@@ -1,0 +1,471 @@
+import app.dataBase as db
+import app.keyboards as keyboards
+import app.cards as cards
+import app.users as users
+
+from app.users import truncate_text
+from app.bot import bot, image_cache
+
+from aiogram.types import LinkPreviewOptions
+
+from aiogram import F, Router
+from aiogram.types import CallbackQuery
+
+from aiogram.filters import StateFilter
+from aiogram.fsm.context import FSMContext
+
+from aiogram.types import InputMediaPhoto
+
+from app.handlers.crosstep.rating.rating_header import Match, positions, get_team, get_max_rating, get_user_defense_tactic, PlayerInfo, Team, get_player_by_card_id, update_team_info, apply_tactic
+
+router = Router()
+
+def get_rating_text(user_id) -> str:
+    conn = db.connection
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT rating, played_this_season FROM user_rating WHERE user_id = {user_id}")
+    user_info = cursor.fetchone()
+    cursor.close()
+
+    # return f"Межсезонье⏳"
+    if user_info[1] is False:
+        return "Ты ещё не играл в этом сезоне"
+    else:
+        return f"Твой рейтинг - {user_info[0]}🏆"
+
+@router.callback_query(F.data == "members", StateFilter(Match.Team))
+async def choose_members(callback : CallbackQuery, state : FSMContext):
+    data = await state.get_data()
+    tactic = data['tactic']
+    team : Team = Team.get_team_from_user_id(callback.from_user.id)
+    team.set_tactic(tactic)
+    await state.update_data(team=team)
+    await watch_team(callback, state, 'PG', False)
+
+@router.callback_query(F.data == 'back', StateFilter(Match.WatchingTeam, Match.WatchingTactic))
+async def back_to_tactic(callback : CallbackQuery, state : FSMContext):
+    await callback.message.delete()
+    await state.set_state(Match.Team)
+    await bot.send_message(chat_id=callback.from_user.id, text="⛹️5 на 5", reply_markup=keyboards.keyboard_5v5_team)
+
+@router.callback_query(F.data == "my_team", StateFilter(Match.Main))
+async def show_team(callback : CallbackQuery, state : FSMContext):
+    await state.set_state(Match.Team)
+    tactic = get_user_defense_tactic(callback.from_user.id)
+    await state.update_data(tactic=tactic)
+    await callback.message.edit_text(text="⛹️5 на 5", reply_markup=keyboards.keyboard_5v5_team)
+
+@router.callback_query(F.data == 'tactic', StateFilter(Match.Team))
+async def show_tactics(callback : CallbackQuery, state : FSMContext):
+    await state.set_state(Match.WatchingTactic)
+    data = await state.get_data()
+    await callback.message.edit_text(text="⛹️5 на 5\n\nВыбери тактику для обороны.", reply_markup=keyboards.craft_choose_tactic(data['tactic']))
+
+@router.callback_query(F.data.in_({"defense", "attack", "balance"}), StateFilter(Match.WatchingTactic))
+async def choose_tactic(callback : CallbackQuery, state : FSMContext):
+    conn = db.connection
+    cursor = conn.cursor()
+    cursor.execute(f"UPDATE user_rating SET defense_tactic = '{callback.data}' WHERE user_id={callback.from_user.id};")
+    cursor.close()
+    conn.commit()
+    await state.update_data(tactic=callback.data)
+    await callback.message.edit_text(text="⛹️5 на 5\n\nВыбери тактику для обороны.", reply_markup=keyboards.craft_choose_tactic(callback.data))
+
+
+@router.callback_query(F.data == 'ticket_channel', StateFilter(Match.Main))
+async def ticket_channels(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(Match.WatchingChannels)
+    text = "⛹️5 на 5\n\nПодпишись на каналы и получай за это билетики.\n"
+    channels_info = db.get_channels_info()
+    used_id = callback.from_user.id
+    not_subbed_info = []
+    subbed_info = []
+    expired_info = []
+    conn = db.connection
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT subscribed_channels, used_channels FROM users WHERE user_id={used_id};")
+    result = cursor.fetchone()
+    subbed = result[0]
+    used = result[1]
+    cursor.close()
+    for info in channels_info:
+        if(info[3] != 't'):
+            continue
+        if(info[0] in subbed):
+            if(info[0] in used):
+                expired_info.append(info)
+            else:
+                subbed_info.append(info)
+        else:
+            not_subbed_info.append(info)
+    
+    for info in not_subbed_info:
+        text += "\n" + "❌" + f'<a href="{info[2]}">{info[1]}</a>'
+    for info in subbed_info:
+        text += "\n" + "✅" + f'<a href="{info[2]}">{info[1]}</a>'
+    for info in expired_info:
+        text += "\n" + "🕜" + f'<a href="{info[2]}">{info[1]}</a>'
+
+    text +='\n\n<a href="https://t.me/STEEEPSERVICES">Добавить канал</a>'
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboards.back, link_preview_options = LinkPreviewOptions(is_disabled=True))
+
+@router.callback_query(F.data == "rating_table", StateFilter(Match.Main))
+async def show_rating_table(callback : CallbackQuery, state : FSMContext):
+    conn = db.connection
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, rating FROM user_rating WHERE played_this_season is TRUE ORDER BY rating DESC LIMIT 10;")
+    users_info = cursor.fetchall()
+    if(len(users_info) == 0):
+        await callback.answer(text="Рейтинг пуст")
+        return
+    
+    await state.set_state(Match.WatchingRating)
+    cursor.execute("SELECT COUNT(*) FROM user_rating WHERE played_this_season is TRUE;")
+    players_count = cursor.fetchone()[0]
+    max_rating = users_info[0][1]
+    cursor.execute(f"""SELECT * FROM (SELECT rating, user_id, ROW_NUMBER() OVER (ORDER BY rating DESC) AS row_number FROM user_rating WHERE played_this_season is TRUE) AS rating_table WHERE user_id={callback.from_user.id};""")
+    own_info = cursor.fetchone()
+    text = f"Играют в этом сезоне: <b>{players_count:5d}</b>⛹️‍♂️\n     <b><i>—————————————</i></b>\n"
+    len_rating = len(str(max_rating))
+    len_pos = 2
+    if(own_info is None):
+        for i in range(len(users_info)):
+            username = users.get_username(users_info[i][0])
+            if(username != 'Аноним'):
+                text += f'<code>{i + 1:{len_pos}d}) {users_info[i][1]:{len_rating}d}🏆</code> - <a href="https://t.me/{username[1:]}">{truncate_text(username, 12)}</a>\n'
+            else:
+                text += f"<code>{i + 1:{len_pos}d}) {users_info[i][1]:{len_rating}d}🏆</code> - Аноним\n"
+            
+        text += "       <b><i>—————————————</i></b>\n"
+        text += f'Ты еще не играл в этом сезоне!\n'
+    else:
+        if own_info[2] > 10:
+            len_pos = len(str(own_info[2]))
+        for i in range(len(users_info)):
+            username = users.get_username(users_info[i][0])
+            if(username != 'Аноним'):
+                if(i == own_info[2] - 1):
+                    text += f'<b><i><code>{i + 1:{len_pos}d}) {users_info[i][1]:{len_rating}d}🏆</code> - <a href="https://t.me/{username[1:]}">{truncate_text(username, 12)}</a></i></b>\n'
+                else:
+                    text += f'<code>{i + 1:{len_pos}d}) {users_info[i][1]:{len_rating}d}🏆</code> - <a href="https://t.me/{username[1:]}">{truncate_text(username, 12)}</a>\n'
+            else:
+                text += f"<code>{i + 1:{len_pos}d}) {users_info[i][1]:{len_rating}d}🏆</code> - Аноним\n"
+        if own_info[2] > 10:
+            username = users.get_username(own_info[1])
+            text += "      <b><i>—————————————\n"
+            text += f'<code>{own_info[2]:{len_pos}d}) {own_info[0]:{len_rating}d}🏆</code> - <a href="https://t.me/{username[1:]}">{truncate_text(username, 12)}</a></i></b>\n'
+    cursor.close()
+
+    await callback.message.edit_text(text=text, reply_markup=keyboards.back, parse_mode="html", link_preview_options = LinkPreviewOptions(is_disabled=True))
+
+
+@router.callback_query(F.data == 'back', StateFilter(Match.Team, Match.WatchingChannels, Match.ChoosingToPlay, Match.WatchingRules, Match.WatchingRating))
+async def back_to_main(callback: CallbackQuery, state : FSMContext):
+    await state.set_state(Match.Main)
+    await callback.message.edit_text(text=f"⛹️5 на 5\n\n{get_rating_text(callback.from_user.id)}", reply_markup=keyboards.keyboard_5v5)
+
+@router.callback_query(F.data == "5v5")
+async def show_5v5_keyboard(callback : CallbackQuery, state : FSMContext):
+    await state.set_state(Match.Main)
+    await callback.message.edit_text(text=f"⛹️5 на 5\n\n{get_rating_text(callback.from_user.id)}", reply_markup=keyboards.keyboard_5v5)
+
+@router.callback_query(F.data == "play", StateFilter(Match.Main))
+async def show_play_keyboard(callback : CallbackQuery, state : FSMContext):
+    cursor = db.connection.cursor()
+    cursor.execute(f"SELECT {positions[0]}, {positions[1]}, {positions[2]}, {positions[3]}, {positions[4]} FROM user_team WHERE user_id={callback.from_user.id};")
+    team_ids = cursor.fetchone()
+    if None in team_ids:
+        await callback.answer(text="Сперва собери команду!", show_alert=True)
+        cursor.close()
+        return
+    cursor.execute(f"SELECT tickets FROM user_rating WHERE user_id={callback.from_user.id};")
+    tickets = cursor.fetchone()[0]
+    cursor.close()
+    await state.set_state(Match.ChoosingToPlay)
+    await callback.message.edit_text(text="⛹️5 на 5", reply_markup=keyboards.craft_match_play_keyboard(tickets))
+
+async def watch_team(callback: CallbackQuery, state : FSMContext, start_pos : str, have : bool):
+    await state.set_state(Match.WatchingTeam)
+    await state.update_data(current_pos=start_pos, have=have)
+    await choose_player(start_pos, callback, state)
+
+@router.callback_query(F.data.in_(positions), StateFilter(Match.WatchingTeam))
+async def prev(callback : CallbackQuery, state : FSMContext):
+    current_pos = callback.data
+    await state.update_data(current_pos=current_pos)
+    await choose_player(current_pos, callback, state)
+
+@router.callback_query(F.data == "pick", StateFilter(Match.WatchingTeam))
+async def start_picking(callback : CallbackQuery, state: FSMContext):
+    await state.set_state(Match.PickingCategory)
+    data = await state.get_data()
+    have = data['have']
+    keyboard = keyboards.choose_category_except_team_for_user(callback.from_user.id)
+    text = "Выбери категорию"
+    if(have):
+        await callback.message.delete()
+        await bot.send_message(chat_id=callback.from_user.id, text=text, reply_markup=keyboard)
+    else:
+        await callback.message.edit_text(text=text, reply_markup=keyboard)
+
+@router.callback_query(F.data == 'back', StateFilter(Match.PickingCategory))
+async def back_to_team(callback: CallbackQuery, state : FSMContext):
+    data = await state.get_data()
+    current_pos = data["current_pos"]
+    await watch_team(callback, state, current_pos, False)
+
+categories = ['all', 'bronze', 'silver', 'gold', 'legend', 'diamond']
+
+@router.callback_query(F.data.in_(categories), StateFilter(Match.PickingCategory))
+async def show_all(callback: CallbackQuery, state: FSMContext):
+    await pick_category(callback, state, callback.data)
+
+async def choose_player(position: str, callback : CallbackQuery, state : FSMContext):
+    await state.set_state(Match.WatchingTeam)
+    conn = db.connection
+    cursor = conn.cursor()
+    data = await state.get_data()
+    current_pos : int = positions.index(position)
+    team : Team = data["team"]
+    have : bool= data['have']
+
+    player = team.players[current_pos]
+    new_have = player is not None
+    text = "Ты никого не выбрал."
+    # if new_have:
+    #     photo = cards.get_card_photo(player.card_id)
+    #     text = player.to_text(data['tactic'])
+    #     mediaPhoto = InputMediaPhoto(media=photo, caption=text, parse_mode='html')
+    
+    new_keyboard = keyboards.craft_team_keyboard(position, new_have, positions[current_pos - 1], positions[(current_pos + 1) % len(positions)])
+    await state.update_data(have=new_have)
+    if new_have:
+        await image_cache.edit_card_media(callback.from_user.id, callback.message.message_id, player.card_id, player.to_text(data['tactic']), new_keyboard)
+        # await callback.message.edit_media(media=mediaPhoto, reply_markup=new_keyboard)
+    else:
+        if(have):
+            await callback.message.delete()
+            await bot.send_message(chat_id=callback.from_user.id, text=text, reply_markup=new_keyboard)
+        else:
+            await callback.message.edit_text(text=text, reply_markup=new_keyboard)
+    cursor.close()
+
+@router.callback_query(F.data == 'back', StateFilter(Match.ChoosingPlayer))
+async def back_to_category(callback: CallbackQuery, state : FSMContext):
+    await state.update_data(have=True)
+    await start_picking(callback, state)
+
+async def pick_category(callback : CallbackQuery, state : FSMContext, category : str):
+    await state.set_state(Match.ChoosingPlayer)
+    indexes = cards.get_cards_indexes_massive_except_team(callback.from_user.id, category)
+    if(len(indexes) == 0):
+        message = "У тебя нет подходящих карточек("
+        await callback.message.edit_text(message, reply_markup=keyboards.back)
+        return
+    await state.update_data(current_choose=0, indexes=indexes)
+    card_id = cards.get_id_card_from_user(callback.from_user.id, indexes[0])
+    # media = cards.get_card_media(card_info['id'])
+    await image_cache.edit_card_media(callback.from_user.id, callback.message.message_id, card_id, cards.cards_caption[card_id], reply_markup=keyboards.team_cards_keyboard(0, len(indexes)))
+    # await callback.message.edit_media(reply_markup=keyboards.team_cards_keyboard(0, len(indexes)), media=media, parse_mode='html')
+
+@router.callback_query(lambda c: c.data.startswith('prev') or c.data.startswith('next'), StateFilter(Match.ChoosingPlayer))
+async def move(callback: CallbackQuery, state: FSMContext):
+    current_index = int(callback.data.split('_')[1])
+    data = await state.get_data()
+    indexes = data['indexes']
+    card_id = cards.get_id_card_from_user(callback.from_user.id, indexes[current_index])
+    await state.update_data(current_choose=current_index)
+    await image_cache.edit_card_media(callback.from_user.id, callback.message.message_id, card_id, cards.cards_caption[card_id], reply_markup=keyboards.team_cards_keyboard(current_index, len(indexes)))
+
+    # await callback.message.edit_media(reply_markup=keyboards.team_cards_keyboard(current_index, len(indexes)), media=media, parse_mode='html')
+
+@router.callback_query(F.data == "choose", StateFilter(Match.ChoosingPlayer))
+async def pick_player(callback: CallbackQuery, state: FSMContext):  
+    await state.set_state(Match.WatchingTeam)
+    data = await state.get_data()
+    have = data["have"]
+    indexes = data["indexes"]
+    current_pos = data["current_pos"]
+    position = current_pos
+    index = indexes[data["current_choose"]]
+    user_id = callback.from_user.id
+    card_id = cards.get_id_card_from_user(user_id, index)            
+    cards.remove_cards_from_user(user_id, [index])
+    cursor = db.connection.cursor()
+    if have:
+        cursor.execute(f"SELECT {position} FROM user_team WHERE user_id={user_id};")
+        back_to_user = cursor.fetchone()[0]
+        if(back_to_user is not None):
+            await cards.add_card(user_id, back_to_user)
+    cursor.execute(f"UPDATE user_team SET {position}={card_id} WHERE user_id={user_id};")
+    team : Team = Team.get_team_from_user_id(callback.from_user.id)
+    team.set_tactic(data['tactic'])
+    await state.update_data(team=team)
+    db.connection.commit()
+    cursor.close()
+    await watch_team(callback, state, current_pos, True)
+
+@router.callback_query(F.data == "remove", StateFilter(Match.WatchingTeam))
+async def remove_player(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    have = data["have"]
+    if not have:
+        return
+    current_pos = data["current_pos"]
+    user_id = callback.from_user.id
+    cursor = db.connection.cursor()
+    cursor.execute(f"SELECT {current_pos} FROM user_team WHERE user_id={user_id};")
+    back_to_user = cursor.fetchone()[0]
+    if(back_to_user is not None):
+            await cards.add_card(user_id, back_to_user)
+    cursor.execute(f"UPDATE user_team SET {current_pos}=null WHERE user_id={user_id};")
+    db.connection.commit()
+    cursor.close()
+    team : Team = Team.get_team_from_user_id(callback.from_user.id)
+    team.set_tactic(data['tactic'])
+    await state.update_data(team=team)
+    await watch_team(callback, state, current_pos, True)
+
+@router.callback_query(F.data == "rewards", StateFilter(Match.Main))
+async def rewards(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(Match.WatchingRating)
+    user_id = callback.from_user.id
+    max_rating = get_max_rating(user_id)
+    conn = db.connection
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT rating, reward FROM rewards_5v5;")
+    rewards = cursor.fetchall()
+    cursor.close()
+    text = '🎗Награды\n\n'
+    for reward in rewards:
+        if max_rating >= reward[0]:
+            text += '✅'
+        else:
+            text += '❌'
+        text += f' {reward[0]}🏆: '
+        for key in reward[1]:
+            if key == 'try':
+                text += f'{reward[1][key]}🤲 '
+                text += '\n         |\n'
+            elif key == 'balls':
+                text += f'{reward[1][key]}🏀 '
+                text += '\n         |\n'
+            elif key == 'bronze_pack':
+                text += f'{reward[1][key]}📦🥉 '
+    
+    await callback.message.edit_text(text, reply_markup=keyboards.back)
+
+rules_count = 8
+
+@router.callback_query(F.data == 'rules', StateFilter(Match.Main))
+async def watch_rules(callback: CallbackQuery, state : FSMContext):
+    await state.set_state(Match.WatchingRules)
+    await callback.message.edit_text(reply_markup=keyboards.craft_rule(0, rules_count), parse_mode='html', text="""<b><i>Суть игры</i></b>\n
+• Каждый STEPbro может собрать свою команду из 5 карточек. Этой командой он атакует чужие, а также в фоновом режиме она защищает его от нападений других STEPbro.\n 
+• У каждого игрока есть свой рейтинг, который влияет на его положение в общей таблице.\n
+• В конце сезона игроки с наивысшим рейтингом получают призы.""")
+    
+@router.callback_query(F.data == 'rule_0', StateFilter(Match.WatchingRules))
+async def watch_rules(callback: CallbackQuery, state : FSMContext):
+    await callback.message.edit_text(reply_markup=keyboards.craft_rule(0, rules_count), parse_mode='html', text="""<b><i>Суть игры</i></b>\n
+• Каждый STEPbro может собрать свою команду из 5 карточек. Этой командой он атакует чужие, а также в фоновом режиме она защищает его от нападений других STEPbro.\n 
+• У каждого игрока есть свой рейтинг, который влияет на его положение в общей таблице.\n
+• В конце сезона игроки с наивысшим рейтингом получают призы.""")
+    
+@router.callback_query(F.data == 'rule_1', StateFilter(Match.WatchingRules))
+async def watch_rules(callback: CallbackQuery, state : FSMContext):
+    await callback.message.edit_text(reply_markup=keyboards.craft_rule(1, rules_count), parse_mode='html', text="""<b><i>Подготовка к 5 на 5</i></b>\n
+Перед игрой в 5 на 5 необходимо набрать свой состав и выбрать тактику для обороны. Это можно сделать в разделе "Команда".
+
+<b><i>Состав</i></b>\n
+• Выставляя игрока на позицию не присущую ему, его все характеристики ухудшаются на 15%.
+• В ином случае характеристики не изменяются.
+
+<b><i>Тактика</i></b>\n
+• Атакующая (⚔️) - улучшение дриблинга на 12%
+• Защитная (🛡) - улучшение защиты на 12%
+• Сбалансированная (⚖️) - улучшение дриблинга и защиты на 6%""")
+    
+@router.callback_query(F.data == 'rule_2', StateFilter(Match.WatchingRules))
+async def watch_rules(callback: CallbackQuery, state : FSMContext):
+    await callback.message.edit_text(reply_markup=keyboards.craft_rule(2, rules_count), parse_mode='html', text="""<b><i>Билетики</i></b>\n
+• За один билетик можно сыграть один матч 5 на 5.
+• Каждый день обновляются билетики в 14:00.
+• При подписке на все предложенные каналы в разделе "Каналы" ежедневно будут выдаваться 3 билетика вместо 1.
+• Если отписаться от канала в разделе "Каналы", ты перестанешь получать дополнительные два билетика за них, но если передумаешь и подпишешься снова, дополнительные два билетика начнут начислять только через неделю.""")
+    
+@router.callback_query(F.data == 'rule_3', StateFilter(Match.WatchingRules))
+async def watch_rules(callback: CallbackQuery, state : FSMContext):
+    await callback.message.edit_text(reply_markup=keyboards.craft_rule(3, rules_count), parse_mode='html', text="""<b><i>Рейтинг</i></b>\n
+• После нападения на команду существует 3 исхода:
+    • Поражение. Отнимается 10 рейтинга + разница в счёте.
+    • Ничья. Рейтинг не изменяется.
+    • Победа. Прибавляется 10 рейтинга + разница в  счёте.\n
+• При нападении на твою команду, рейтинг не будет изменен.""")
+    
+@router.callback_query(F.data == 'rule_4', StateFilter(Match.WatchingRules))
+async def watch_rules(callback: CallbackQuery, state : FSMContext):
+    await callback.message.edit_text(reply_markup=keyboards.craft_rule(4, rules_count), parse_mode='html', text="""<b><i>Матч 5 на 5</i></b>\n
+Каждый раз, когда ты начинаешь игру в 5 на 5 это значит, что составленная команда "нападает" на команду случайного противника.
+
+<b><i>Ход игры</i></b>\n
+• В начале матча нужно выбрать тактику для нападения на команду соперника.
+• Игру начинает твоя команда, всего 5 атак.
+• В начале атаки мяч оказывается у PG с 50% вероятностью, либо у одного из двух других игроков с лучшим показателем паса.
+• Можно выбрать одно из трех действий: пройти самому или отдать пас одному из двух сокомандников.
+• После завершения действия, команда противника начинает атаковать в ответ.""")
+    
+@router.callback_query(F.data == 'rule_5', StateFilter(Match.WatchingRules))
+async def watch_rules(callback: CallbackQuery, state : FSMContext):
+    await callback.message.edit_text(reply_markup=keyboards.craft_rule(5, rules_count), parse_mode='html', text="""<b><i>Матч 5 на 5</i></b>
+<b><i>Проход через соперника</i></b>\n
+Перед броском, игрок пытается создать пространство для себя.
+У игроков сталкиваются характеристики дриблинга(⛹️‍♂️) и обороны(🛡).
+Исходы:
+• Свободный бросок. Характеристика броска увеличивается на 20%.
+• Сложный бросок. Характеристика броска уменьшается на 10%.
+• Защита прессует игрока, отсюда сталкиваются характеристики удержания мяча(👐) и кражи(🥷):
+        • Бросок через блок. Характеристика броска уменьшается на 10%, поверх этого отнимается половина от характеристики блока(🚫) защитника.
+        • Перехваченный мяч. Соперник начинает атаку, на весь цикл атаки твоя защита снижена на 10%
+
+Характеристики броска, лэй-апа и данка показывают в процентах шанс успеха.""")
+    
+@router.callback_query(F.data == 'rule_6', StateFilter(Match.WatchingRules))
+async def watch_rules(callback: CallbackQuery, state : FSMContext):
+    await callback.message.edit_text(reply_markup=keyboards.craft_rule(6, rules_count), parse_mode='html', text="""<b><i>Матч 5 на 5</i></b>
+<b><i>Пас</i></b>\n
+При попытке отдать пас сравниваются характеристики: пас (🤝) у владеющего мячом и защита (🛡) у защищающегося.
+                                     
+Исходы:
+• Свободный пасс, сталкиваются характеристики: пас(🤝) отдающего и реакция на пасы(🪬) защитника принимающего:
+        • Хороший пасс. Ухудшение обороны защищающегося на 10%.
+        • Отличный пасс. Ухудшение обороны защищающегося на 20%.
+        • Идеальный пасс. Защита противника уничтожена, остается только успешно забить.
+                                         
+• Защита прессует игрока, отсюда сталкиваются характеристики удержания мяча(👐) и кражы(🥷):
+        • Плохой пасс. Ухудшение дриблинга на 15% игрока, которому отдали пасс;
+        • Неудачный пасс. Соперник начинает атаку, на весь цикл атаки твоя защита снижена на 10%""")
+
+@router.callback_query(F.data == 'rule_7', StateFilter(Match.WatchingRules))
+async def watch_rules(callback: CallbackQuery, state : FSMContext):
+    await callback.message.edit_text(reply_markup=keyboards.craft_rule(7, rules_count), parse_mode='html', text="""<b><i>Обозначения</i></b>
+<b><i>Характеристики карточек:</i></b>
+    3️⃣ - Трехочковый бросок
+    2️⃣ - Двухочковый бросок
+    ⤴️ - Лэй-ап
+    ⤵️ - Данк
+    ⛹️‍♂️ - Дриблинг
+    🤝 - Пасс
+    🎯 - Защита на периметре
+    🎨 - Защита в краске
+    🚫 - Блок
+    🪬 - Реакция на пасы в защите
+    👐 - Удержание мяча
+    🥷 - Кража
+
+<b><i>5 на 5:</i></b>
+    📍 - Позиция игрока
+    🛡 - Защита и в краске, и на периметре""")
+    
+    
