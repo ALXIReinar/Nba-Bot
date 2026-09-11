@@ -1,10 +1,11 @@
-import app.dataBase as db
+
 import app.keyboards as keyboards
 import app.cards as cards
 import app.users as users
 
 from app.users import truncate_text
-from app.bot import bot, image_cache
+from app.bot import image_cache
+from core.config_dir.config import bot
 
 from aiogram.types import LinkPreviewOptions
 
@@ -14,30 +15,26 @@ from aiogram.types import CallbackQuery
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 
-from aiogram.types import InputMediaPhoto
-
-from app.handlers.crosstep.rating.rating_header import Match, positions, get_team, get_max_rating, get_user_defense_tactic, PlayerInfo, Team, get_player_by_card_id, update_team_info, apply_tactic
+from core.data.postgres import PgSql
+from core.handlers.rating_header import Match, positions, get_max_rating, get_user_defense_tactic, Team
 
 router = Router()
 
-def get_rating_text(user_id) -> str:
-    conn = db.connection
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT rating, played_this_season FROM user_rating WHERE user_id = {user_id}")
-    user_info = cursor.fetchone()
-    cursor.close()
+async def get_rating_text(user_id, db: PgSql) -> str:
+    user_info = await db.conn.fetchrow(f"SELECT rating, played_this_season FROM user_rating WHERE user_id = $1", user_id)
 
     # return f"Межсезонье⏳"
-    if user_info[1] is False:
+    if not user_info['played_this_season']:
+    # if user_info[1] is False:
         return "Ты ещё не играл в этом сезоне"
     else:
-        return f"Твой рейтинг - {user_info[0]}🏆"
+        return f"Твой рейтинг - {user_info['rating']}🏆"
 
 @router.callback_query(F.data == "members", StateFilter(Match.Team))
-async def choose_members(callback : CallbackQuery, state : FSMContext):
+async def choose_members(callback : CallbackQuery, state : FSMContext, db: PgSql):
     data = await state.get_data()
     tactic = data['tactic']
-    team : Team = Team.get_team_from_user_id(callback.from_user.id)
+    team : Team = await Team.get_team_from_user_id(callback.from_user.id, db)
     team.set_tactic(tactic)
     await state.update_data(team=team)
     await watch_team(callback, state, 'PG', False)
@@ -49,9 +46,9 @@ async def back_to_tactic(callback : CallbackQuery, state : FSMContext):
     await bot.send_message(chat_id=callback.from_user.id, text="⛹️5 на 5", reply_markup=keyboards.keyboard_5v5_team)
 
 @router.callback_query(F.data == "my_team", StateFilter(Match.Main))
-async def show_team(callback : CallbackQuery, state : FSMContext):
+async def show_team(callback : CallbackQuery, state : FSMContext, db: PgSql):
     await state.set_state(Match.Team)
-    tactic = get_user_defense_tactic(callback.from_user.id)
+    tactic = await get_user_defense_tactic(callback.from_user.id, db)
     await state.update_data(tactic=tactic)
     await callback.message.edit_text(text="⛹️5 на 5", reply_markup=keyboards.keyboard_5v5_team)
 
@@ -62,18 +59,14 @@ async def show_tactics(callback : CallbackQuery, state : FSMContext):
     await callback.message.edit_text(text="⛹️5 на 5\n\nВыбери тактику для обороны.", reply_markup=keyboards.craft_choose_tactic(data['tactic']))
 
 @router.callback_query(F.data.in_({"defense", "attack", "balance"}), StateFilter(Match.WatchingTactic))
-async def choose_tactic(callback : CallbackQuery, state : FSMContext):
-    conn = db.connection
-    cursor = conn.cursor()
-    cursor.execute(f"UPDATE user_rating SET defense_tactic = '{callback.data}' WHERE user_id={callback.from_user.id};")
-    cursor.close()
-    conn.commit()
+async def choose_tactic(callback : CallbackQuery, state : FSMContext, db: PgSql):
+    await db.conn.execute(f"UPDATE user_rating SET defense_tactic = '{callback.data}' WHERE user_id={callback.from_user.id};")
     await state.update_data(tactic=callback.data)
     await callback.message.edit_text(text="⛹️5 на 5\n\nВыбери тактику для обороны.", reply_markup=keyboards.craft_choose_tactic(callback.data))
 
 
 @router.callback_query(F.data == 'ticket_channel', StateFilter(Match.Main))
-async def ticket_channels(callback: CallbackQuery, state: FSMContext):
+async def ticket_channels(callback: CallbackQuery, state: FSMContext, db: PgSql):
     await state.set_state(Match.WatchingChannels)
     text = "⛹️5 на 5\n\nПодпишись на каналы и получай за это билетики.\n"
     channels_info = db.get_channels_info()
@@ -81,13 +74,12 @@ async def ticket_channels(callback: CallbackQuery, state: FSMContext):
     not_subbed_info = []
     subbed_info = []
     expired_info = []
-    conn = db.connection
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT subscribed_channels, used_channels FROM users WHERE user_id={used_id};")
-    result = cursor.fetchone()
-    subbed = result[0]
-    used = result[1]
-    cursor.close()
+
+
+    result = await db.conn.fetchrow(f"SELECT subscribed_channels, used_channels FROM users WHERE user_id = $1", used_id)
+    used = result['used_channels']
+    subbed = result['subscribed_channels']
+
     for info in channels_info:
         if(info[3] != 't'):
             continue
@@ -111,31 +103,27 @@ async def ticket_channels(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboards.back, link_preview_options = LinkPreviewOptions(is_disabled=True))
 
 @router.callback_query(F.data == "rating_table", StateFilter(Match.Main))
-async def show_rating_table(callback : CallbackQuery, state : FSMContext):
-    conn = db.connection
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, rating FROM user_rating WHERE played_this_season is TRUE ORDER BY rating DESC LIMIT 10;")
-    users_info = cursor.fetchall()
+async def show_rating_table(callback : CallbackQuery, state : FSMContext, db: PgSql):
+
+    users_info = await db.conn.fetch("SELECT user_id, rating FROM user_rating WHERE played_this_season is TRUE ORDER BY rating DESC LIMIT 10;")
     if(len(users_info) == 0):
         await callback.answer(text="Рейтинг пуст")
         return
     
     await state.set_state(Match.WatchingRating)
-    cursor.execute("SELECT COUNT(*) FROM user_rating WHERE played_this_season is TRUE;")
-    players_count = cursor.fetchone()[0]
-    max_rating = users_info[0][1]
-    cursor.execute(f"""SELECT * FROM (SELECT rating, user_id, ROW_NUMBER() OVER (ORDER BY rating DESC) AS row_number FROM user_rating WHERE played_this_season is TRUE) AS rating_table WHERE user_id={callback.from_user.id};""")
-    own_info = cursor.fetchone()
+    players_count = await db.conn.fetchval("SELECT COUNT(*) FROM user_rating WHERE played_this_season is TRUE;")
+    max_rating = users_info[0]['rating']
+    own_info = await db.conn.fetch(f"""SELECT * FROM (SELECT rating, user_id, ROW_NUMBER() OVER (ORDER BY rating DESC) AS row_number FROM user_rating WHERE played_this_season is TRUE) AS rating_table WHERE user_id={callback.from_user.id};""")
     text = f"Играют в этом сезоне: <b>{players_count:5d}</b>⛹️‍♂️\n     <b><i>—————————————</i></b>\n"
     len_rating = len(str(max_rating))
     len_pos = 2
     if(own_info is None):
         for i in range(len(users_info)):
-            username = users.get_username(users_info[i][0])
+            username = users.get_username(users_info[i]['user_id'])
             if(username != 'Аноним'):
-                text += f'<code>{i + 1:{len_pos}d}) {users_info[i][1]:{len_rating}d}🏆</code> - <a href="https://t.me/{username[1:]}">{truncate_text(username, 12)}</a>\n'
+                text += f'<code>{i + 1:{len_pos}d}) {users_info[i]['rating']:{len_rating}d}🏆</code> - <a href="https://t.me/{username[1:]}">{truncate_text(username, 12)}</a>\n'
             else:
-                text += f"<code>{i + 1:{len_pos}d}) {users_info[i][1]:{len_rating}d}🏆</code> - Аноним\n"
+                text += f"<code>{i + 1:{len_pos}d}) {users_info[i]['rating']:{len_rating}d}🏆</code> - Аноним\n"
             
         text += "       <b><i>—————————————</i></b>\n"
         text += f'Ты еще не играл в этом сезоне!\n'
@@ -143,45 +131,42 @@ async def show_rating_table(callback : CallbackQuery, state : FSMContext):
         if own_info[2] > 10:
             len_pos = len(str(own_info[2]))
         for i in range(len(users_info)):
-            username = users.get_username(users_info[i][0])
+            username = users.get_username(users_info[i]['user_id'])
             if(username != 'Аноним'):
                 if(i == own_info[2] - 1):
-                    text += f'<b><i><code>{i + 1:{len_pos}d}) {users_info[i][1]:{len_rating}d}🏆</code> - <a href="https://t.me/{username[1:]}">{truncate_text(username, 12)}</a></i></b>\n'
+                    text += f'<b><i><code>{i + 1:{len_pos}d}) {users_info[i]['rating']:{len_rating}d}🏆</code> - <a href="https://t.me/{username[1:]}">{truncate_text(username, 12)}</a></i></b>\n'
                 else:
-                    text += f'<code>{i + 1:{len_pos}d}) {users_info[i][1]:{len_rating}d}🏆</code> - <a href="https://t.me/{username[1:]}">{truncate_text(username, 12)}</a>\n'
+                    text += f'<code>{i + 1:{len_pos}d}) {users_info[i]['rating']:{len_rating}d}🏆</code> - <a href="https://t.me/{username[1:]}">{truncate_text(username, 12)}</a>\n'
             else:
-                text += f"<code>{i + 1:{len_pos}d}) {users_info[i][1]:{len_rating}d}🏆</code> - Аноним\n"
+                text += f"<code>{i + 1:{len_pos}d}) {users_info[i]['rating']:{len_rating}d}🏆</code> - Аноним\n"
         if own_info[2] > 10:
-            username = users.get_username(own_info[1])
+            username = users.get_username(own_info['user_id'])
             text += "      <b><i>—————————————\n"
             text += f'<code>{own_info[2]:{len_pos}d}) {own_info[0]:{len_rating}d}🏆</code> - <a href="https://t.me/{username[1:]}">{truncate_text(username, 12)}</a></i></b>\n'
-    cursor.close()
+
 
     await callback.message.edit_text(text=text, reply_markup=keyboards.back, parse_mode="html", link_preview_options = LinkPreviewOptions(is_disabled=True))
 
 
 @router.callback_query(F.data == 'back', StateFilter(Match.Team, Match.WatchingChannels, Match.ChoosingToPlay, Match.WatchingRules, Match.WatchingRating))
-async def back_to_main(callback: CallbackQuery, state : FSMContext):
+async def back_to_main(callback: CallbackQuery, state : FSMContext, db: PgSql):
     await state.set_state(Match.Main)
-    await callback.message.edit_text(text=f"⛹️5 на 5\n\n{get_rating_text(callback.from_user.id)}", reply_markup=keyboards.keyboard_5v5)
+    await callback.message.edit_text(text=f"⛹️5 на 5\n\n{await get_rating_text(callback.from_user.id, db)}", reply_markup=keyboards.keyboard_5v5)
 
 @router.callback_query(F.data == "5v5")
-async def show_5v5_keyboard(callback : CallbackQuery, state : FSMContext):
+async def show_5v5_keyboard(callback : CallbackQuery, state : FSMContext, db: PgSql):
     await state.set_state(Match.Main)
-    await callback.message.edit_text(text=f"⛹️5 на 5\n\n{get_rating_text(callback.from_user.id)}", reply_markup=keyboards.keyboard_5v5)
+    await callback.message.edit_text(text=f"⛹️5 на 5\n\n{await get_rating_text(callback.from_user.id, db)}", reply_markup=keyboards.keyboard_5v5)
 
 @router.callback_query(F.data == "play", StateFilter(Match.Main))
-async def show_play_keyboard(callback : CallbackQuery, state : FSMContext):
-    cursor = db.connection.cursor()
-    cursor.execute(f"SELECT {positions[0]}, {positions[1]}, {positions[2]}, {positions[3]}, {positions[4]} FROM user_team WHERE user_id={callback.from_user.id};")
-    team_ids = cursor.fetchone()
+async def show_play_keyboard(callback : CallbackQuery, state : FSMContext, db: PgSql):
+    # team_ids = await db.conn.fetchrow(f"SELECT {positions[0]}, {positions[1]}, {positions[2]}, {positions[3]}, {positions[4]} FROM user_team WHERE user_id={callback.from_user.id};")
+    team_ids = await db.conn.fetchrow(f"SELECT {', '.join(positions)} FROM user_team WHERE user_id = $1 AND ({', '.join(positions)}) NOT NULL", callback.from_user.id)
     if None in team_ids:
         await callback.answer(text="Сперва собери команду!", show_alert=True)
-        cursor.close()
         return
-    cursor.execute(f"SELECT tickets FROM user_rating WHERE user_id={callback.from_user.id};")
-    tickets = cursor.fetchone()[0]
-    cursor.close()
+
+    tickets = await db.conn.fetchval(f"SELECT tickets FROM user_rating WHERE user_id = $1", callback.from_user.id)
     await state.set_state(Match.ChoosingToPlay)
     await callback.message.edit_text(text="⛹️5 на 5", reply_markup=keyboards.craft_match_play_keyboard(tickets))
 
@@ -222,9 +207,12 @@ async def show_all(callback: CallbackQuery, state: FSMContext):
     await pick_category(callback, state, callback.data)
 
 async def choose_player(position: str, callback : CallbackQuery, state : FSMContext):
+    """
+    Нет запросов в БД, убрал соединенеи с ней
+    """
     await state.set_state(Match.WatchingTeam)
-    conn = db.connection
-    cursor = conn.cursor()
+    # conn = db.connection
+    # cursor = conn.cursor()
     data = await state.get_data()
     current_pos : int = positions.index(position)
     team : Team = data["team"]
@@ -249,7 +237,7 @@ async def choose_player(position: str, callback : CallbackQuery, state : FSMCont
             await bot.send_message(chat_id=callback.from_user.id, text=text, reply_markup=new_keyboard)
         else:
             await callback.message.edit_text(text=text, reply_markup=new_keyboard)
-    cursor.close()
+    # cursor.close()
 
 @router.callback_query(F.data == 'back', StateFilter(Match.ChoosingPlayer))
 async def back_to_category(callback: CallbackQuery, state : FSMContext):
@@ -281,7 +269,7 @@ async def move(callback: CallbackQuery, state: FSMContext):
     # await callback.message.edit_media(reply_markup=keyboards.team_cards_keyboard(current_index, len(indexes)), media=media, parse_mode='html')
 
 @router.callback_query(F.data == "choose", StateFilter(Match.ChoosingPlayer))
-async def pick_player(callback: CallbackQuery, state: FSMContext):  
+async def pick_player(callback: CallbackQuery, state: FSMContext, db: PgSql):
     await state.set_state(Match.WatchingTeam)
     data = await state.get_data()
     have = data["have"]
@@ -292,67 +280,55 @@ async def pick_player(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     card_id = cards.get_id_card_from_user(user_id, index)            
     cards.remove_cards_from_user(user_id, [index])
-    cursor = db.connection.cursor()
     if have:
-        cursor.execute(f"SELECT {position} FROM user_team WHERE user_id={user_id};")
-        back_to_user = cursor.fetchone()[0]
+        back_to_user = await db.conn.fetchval(f"SELECT {position} FROM user_team WHERE user_id = $1", user_id)
         if(back_to_user is not None):
             await cards.add_card(user_id, back_to_user)
-    cursor.execute(f"UPDATE user_team SET {position}={card_id} WHERE user_id={user_id};")
-    team : Team = Team.get_team_from_user_id(callback.from_user.id)
+    await db.conn.execute(f"UPDATE user_team SET {position}={card_id} WHERE user_id={user_id};")
+    team : Team = await Team.get_team_from_user_id(callback.from_user.id, db)
     team.set_tactic(data['tactic'])
     await state.update_data(team=team)
-    db.connection.commit()
-    cursor.close()
     await watch_team(callback, state, current_pos, True)
 
 @router.callback_query(F.data == "remove", StateFilter(Match.WatchingTeam))
-async def remove_player(callback: CallbackQuery, state: FSMContext):
+async def remove_player(callback: CallbackQuery, state: FSMContext, db: PgSql):
     data = await state.get_data()
     have = data["have"]
     if not have:
         return
     current_pos = data["current_pos"]
     user_id = callback.from_user.id
-    cursor = db.connection.cursor()
-    cursor.execute(f"SELECT {current_pos} FROM user_team WHERE user_id={user_id};")
-    back_to_user = cursor.fetchone()[0]
+    back_to_user = await db.conn.fetcval(f"SELECT {current_pos} FROM user_team WHERE user_id = $1", user_id)
     if(back_to_user is not None):
             await cards.add_card(user_id, back_to_user)
-    cursor.execute(f"UPDATE user_team SET {current_pos}=null WHERE user_id={user_id};")
-    db.connection.commit()
-    cursor.close()
-    team : Team = Team.get_team_from_user_id(callback.from_user.id)
+    await db.conn.execute(f"UPDATE user_team SET {current_pos}=null WHERE user_id={user_id};")
+    team : Team = await Team.get_team_from_user_id(callback.from_user.id, db)
     team.set_tactic(data['tactic'])
     await state.update_data(team=team)
     await watch_team(callback, state, current_pos, True)
 
 @router.callback_query(F.data == "rewards", StateFilter(Match.Main))
-async def rewards(callback: CallbackQuery, state: FSMContext):
+async def rewards(callback: CallbackQuery, state: FSMContext, db: PgSql):
     await state.set_state(Match.WatchingRating)
     user_id = callback.from_user.id
-    max_rating = get_max_rating(user_id)
-    conn = db.connection
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT rating, reward FROM rewards_5v5;")
-    rewards = cursor.fetchall()
-    cursor.close()
+    max_rating = await get_max_rating(user_id, db)
+    rewards = await db.conn.fetch("SELECT rating, reward FROM rewards_5v5;")
     text = '🎗Награды\n\n'
     for reward in rewards:
-        if max_rating >= reward[0]:
+        if max_rating >= reward["rating"]:
             text += '✅'
         else:
             text += '❌'
-        text += f' {reward[0]}🏆: '
-        for key in reward[1]:
+        text += f' {reward["rating"]}🏆: '
+        for key in reward["reward"]:
             if key == 'try':
-                text += f'{reward[1][key]}🤲 '
+                text += f'{reward["reward"][key]}🤲 '
                 text += '\n         |\n'
             elif key == 'balls':
-                text += f'{reward[1][key]}🏀 '
+                text += f'{reward["reward"][key]}🏀 '
                 text += '\n         |\n'
             elif key == 'bronze_pack':
-                text += f'{reward[1][key]}📦🥉 '
+                text += f'{reward["reward"][key]}📦🥉 '
     
     await callback.message.edit_text(text, reply_markup=keyboards.back)
 

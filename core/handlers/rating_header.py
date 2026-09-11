@@ -1,11 +1,11 @@
-import app.cards as cards
+
 import random
 
 from aiogram.fsm.state import StatesGroup, State
 
-import app.dataBase as db
-
 import copy
+
+from core.data.postgres import PgSql
 
 
 class Match(StatesGroup):
@@ -273,23 +273,22 @@ class Team:
         self.players = players
 
     @staticmethod
-    def get_team_from_user_id(user_id):
-        cursor = db.connection.cursor()
-        cursor.execute(f"SELECT {positions[0]}, {positions[1]}, {positions[2]}, {positions[3]}, {positions[4]} FROM user_team WHERE user_id={user_id};")
-        team_ids = cursor.fetchone()
+    async def get_team_from_user_id(user_id, db: PgSql):
+        # team_ids = await db.conn.fetchrow(f"SELECT {positions[0]}, {positions[1]}, {positions[2]}, {positions[3]}, {positions[4]} FROM user_team WHERE user_id={user_id};")
+        team_ids = await db.conn.fetchrow(f"SELECT {', '.join(positions)} FROM user_team WHERE user_id = $1", user_id)
         team_players = []
         for i in range(len(positions)):
-            if(team_ids[i] == None):
+            # if(team_ids[i] == None):
+            if(team_ids[positions[i].lower()] == None):
                 team_players.append(None)
                 continue
-            player = get_player_by_card_id(team_ids[i], i)
+            player = await get_player_by_card_id(team_ids[i], i, db)
             if(positions[i] in player.positions):
                 player.on_right_position = True
             else:
                 player.apply_pos_debuff()
             team_players.append(player)
 
-        cursor.close()
         return Team(team_players)
 
     def set_tactic(self, tactic : str):
@@ -342,22 +341,22 @@ tactic_message = {
     'balance': "Сбалансированная⚖️"
 }
 
-def get_max_rating(user_id: int) -> int:
-    cursor = db.connection.cursor()
-    cursor.execute(f"SELECT max_rating FROM user_rating WHERE user_id={user_id};")
-    rating = cursor.fetchone()[0]
-    cursor.close()
-    return rating
+async def get_max_rating(user_id: int, db: PgSql) -> int:
+    return await db.conn.fetchval(f"SELECT max_rating FROM user_rating WHERE user_id = $1", user_id)
 
-def get_rating(user_id) -> int:
-    if db.joker:
-        return random.randint(-2000, 2000)
-    else:
-        cursor = db.connection.cursor()
-        cursor.execute(f"SELECT rating FROM user_rating WHERE user_id={user_id};")
-        rating = cursor.fetchone()[0]
-        cursor.close()
-        return rating
+async def get_rating(user_id, db: PgSql) -> int:
+    """
+    Не используется в rating_header, rating_team, rating_game - файлах
+    """
+    # if db.joker:
+    #     return random.randint(-2000, 2000)
+    # else:
+    #     cursor = db.connection.cursor()
+    #     cursor.execute(f"SELECT rating FROM user_rating WHERE user_id={user_id};")
+    #     rating = cursor.fetchone()[0]
+    #     cursor.close()
+    #     return rating
+    return await db.conn.fetchval(f"SELECT rating FROM user_rating WHERE user_id = $1", user_id)
 
 def update_team_info(team : list[PlayerInfo]):
     clubs = {}
@@ -389,44 +388,36 @@ def apply_def_debuff(team : list[PlayerInfo], debuff):
             player.base_interior_def * debuff
             player.base_perimetr_def * debuff
 
-def get_team_ids(user_id) -> list[int]:
-    cursor = db.connection.cursor()
-    cursor.execute(f"SELECT {positions[0]}, {positions[1]}, {positions[2]}, {positions[3]}, {positions[4]} FROM user_team WHERE user_id={user_id};")
-    team = cursor.fetchone()
-    cursor.close()
-    return team
+async def get_team_ids(user_id, db: PgSql) -> list[int]:
+    # cursor.execute(f"SELECT {positions[0]}, {positions[1]}, {positions[2]}, {positions[3]}, {positions[4]} FROM user_team WHERE user_id={user_id};")
+    return (await db.conn.fetchrow(f"SELECT {', '.join(positions)} FROM user_team WHERE user_id = $1", user_id)).values()
 
-def get_player_by_card_id(card_id, pos : int) -> PlayerInfo:
-    cursor = db.connection.cursor()
-    cursor.execute(f"SELECT category, name, club, position, threepoint_shot, mid_range_shot, layup, dunk, perimetr_defense, interior_defense, passplay, dribbling, block, steal, hands, pass_perception FROM cards WHERE card_id={card_id}")
-    result = cursor.fetchone()
-    base_stats : PlayerStats = PlayerStats(result[4], result[5], result[6], result[7], result[8], result[9], result[10], result[11], result[12], result[13], result[14], result[15])
-    player = PlayerInfo(card_id, pos, result[0], result[1], base_stats, result[2], result[3])
-    cursor.close()
+async def get_player_by_card_id(card_id, pos : int, db: PgSql) -> PlayerInfo:
+    player_cols = ["category", "name", "club", "position"]
+    stats_cols = ["threepoint_shot", "mid_range_shot", "layup", "dunk", "perimetr_defense", "interior_defense", "passplay", "dribbling", "block", "steal", "hands", "pass_perception"]
+    result = await db.conn.fetchrow(f"SELECT {', '.join(player_cols)}, {', '.join(stats_cols)} FROM cards WHERE card_id = $1", card_id)
+
+    # base_stats : PlayerStats = PlayerStats(result[4], result[5], result[6], result[7], result[8], result[9], result[10], result[11], result[12], result[13], result[14], result[15])
+    base_stats : PlayerStats = PlayerStats(*tuple(result[col] for col in stats_cols))
+    # player = PlayerInfo(card_id, pos, result[0], result[1], base_stats, result[2], result[3])
+    player = PlayerInfo(card_id, pos, result[player_cols[0]], result[player_cols[1]], base_stats, result[player_cols[2]], result[player_cols[3]])
     return player
 
-def get_user_defense_tactic(user_id):
-    cursor = db.connection.cursor()
-    cursor.execute(f"SELECT defense_tactic FROM user_rating WHERE user_id={user_id};")
-    tactic = cursor.fetchone()[0]
-    cursor.close()
-    return tactic
+async def get_user_defense_tactic(user_id, db: PgSql):
+    return await db.conn.fetchval(f"SELECT defense_tactic FROM user_rating WHERE user_id = $1", user_id)
 
-def get_team(user_id) -> list[PlayerInfo]:
-    cursor = db.connection.cursor()
-    cursor.execute(f"SELECT {positions[0]}, {positions[1]}, {positions[2]}, {positions[3]}, {positions[4]} FROM user_team WHERE user_id={user_id};")
-    team_ids = cursor.fetchone()
+async def get_team(user_id, db: PgSql) -> list[PlayerInfo]:
+    team_ids = (await db.conn.fetchrow(f"SELECT {', '.join(positions)} FROM user_team WHERE user_id = $1", user_id)).values()
     team_players = []
     for i in range(len(positions)):
         if(team_ids[i] == None):
             team_players.append(None)
             continue
-        player = get_player_by_card_id(team_ids[i], i)
+        player = await get_player_by_card_id(team_ids[i], i, db)
         if(positions[i] in player.positions):
             player.on_right_position = True
         else:
             player.apply_pos_debuff()
         team_players.append(player)
 
-    cursor.close()
     return team_players

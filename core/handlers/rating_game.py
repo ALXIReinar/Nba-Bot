@@ -1,9 +1,10 @@
-import app.dataBase as db
+# import app.dataBase as db
 import app.keyboards as keyboards
 import app.users as users
 import app.cards as cards
 import random
 import asyncio
+import logging as logger
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
@@ -15,9 +16,10 @@ from aiogram.types import Message
 
 import app.handlers.crosstep.tasks as tasks
 
-from app.handlers.crosstep.rating.rating_header import PlayerInfo, Team, positions, tactic_message, pick_tactic_message, PlayersPair, platform_position_emoji, Match
+from core.config_dir.config import bot
+from core.data.postgres import PgSql
+from core.handlers.rating_header import PlayerInfo, Team, positions, tactic_message, pick_tactic_message, PlayersPair, platform_position_emoji, Match
 
-from aiogram.exceptions import TelegramBadRequest
 
 router = Router()
 
@@ -144,12 +146,13 @@ def get_best_perimetr_def(team: list[PlayerInfo]) -> PlayerInfo:
 def get_center_player(team: list[PlayerInfo]) -> PlayerInfo:
     return team[positions.index("C")]
 
-def get_team_info(user_id) -> str:
-    cursor = db.connection.cursor()
-    cursor.execute(f"SELECT {positions[0]}, {positions[1]}, {positions[2]}, {positions[3]}, {positions[4]} FROM user_team WHERE user_id={user_id};")
-    team = cursor.fetchone()
-    cursor.close()
+async def get_team_info(user_id, db: PgSql) -> str:
+    # team = await db.conn.fetchrow(f"SELECT {positions[0]}, {positions[1]}, {positions[2]}, {positions[3]}, {positions[4]} FROM user_team WHERE user_id={user_id}")
+    team = await db.conn.fetchrow(f"SELECT {', '.join(positions)} FROM user_team WHERE user_id = $1", user_id)
+
     # TODO for loop
+    # TODO instead for cycle: result = f"<code>{'\n'.join([f"{role_column.upper()}: {team_card_value}" for role_column, team_card_value in team.values()])}</code>"
+
     result = "<code>"
     result += "C:  "
     result += cards.get_card_name(team[0]) + "\n"
@@ -553,7 +556,7 @@ def calculate_goodness_pass(pg_pair: PlayersPair, pass_pair: PlayersPair) -> flo
     return pass_chanse * chance_to_dribble
 
 @router.callback_query(F.data == 'run')
-async def run(callback : CallbackQuery, state : FSMContext):
+async def run(callback : CallbackQuery, state : FSMContext, db: PgSql):
     user_id = callback.from_user.id
 
     if(users.is_user_actions_locked(user_id)):
@@ -638,12 +641,12 @@ async def run(callback : CallbackQuery, state : FSMContext):
                 await set_positions(state, False, True)
                 await send_attack_message(user_id, state)
             else:
-                await start_bot_attack(callback, state, True)
+                await start_bot_attack(callback, state, True, db)
             
     finally:
         users.unlock_user_actions(user_id)
 
-async def bot_try_pass(callback: CallbackQuery, state: FSMContext, pg_pair : PlayersPair, pass_pair : PlayersPair):
+async def bot_try_pass(callback: CallbackQuery, state: FSMContext, pg_pair : PlayersPair, pass_pair : PlayersPair, db: PgSql):
     message = get_pass_message(pg_pair, pass_pair)
     await image_cache.send_card(callback.from_user.id, pg_pair.attacker.card_id, '🤖' + message)
 
@@ -654,12 +657,12 @@ async def bot_try_pass(callback: CallbackQuery, state: FSMContext, pg_pair : Pla
     await asyncio.sleep(1)
 
     if(success):
-        await bot_choose_action(callback, state, False, True)
+        await bot_choose_action(callback, state, False, True, db)
     else:
-        await start_player_cycle(callback, state, True, True)
+        await start_player_cycle(callback, state, True, True, db)
 
 
-async def bot_try_dribble(callback: CallbackQuery, state: FSMContext, pair : PlayersPair):
+async def bot_try_dribble(callback: CallbackQuery, state: FSMContext, pair : PlayersPair, db: PgSql):
     data = await state.get_data()
 
     opp_def = pair.defender.get_interior_def() if pair.position == 'interior' else pair.defender.get_perimetr_def()
@@ -673,18 +676,18 @@ async def bot_try_dribble(callback: CallbackQuery, state: FSMContext, pair : Pla
 
     if score >= 0:
         await state.update_data(opp_score=data['opp_score'] + score, def_debuff=0)
-        await start_player_cycle(callback, state, True, False)
+        await start_player_cycle(callback, state, True, False, db)
     else:
         await bot.send_message(callback.from_user.id, f'🤖Проход не удался!\n\nМяч перехвачен, защита снижена на 10%')
         await state.update_data(def_debuff=0.1)
-        await start_player_cycle(callback, state, True, True)
+        await start_player_cycle(callback, state, True, True, db)
 
-async def start_bot_attack(callback: CallbackQuery, state : FSMContext, save_pg : bool):
+async def start_bot_attack(callback: CallbackQuery, state : FSMContext, save_pg : bool, db: PgSql):
     await asyncio.sleep(1)
     await state.update_data(pass_state='none', pass_count=0)
-    await bot_choose_action(callback, state, True, save_pg)
+    await bot_choose_action(callback, state, True, save_pg, db)
 
-async def bot_choose_action(callback: CallbackQuery, state : FSMContext, switch : bool, save_pg : bool):
+async def bot_choose_action(callback: CallbackQuery, state : FSMContext, switch : bool, save_pg : bool, db: PgSql):
     await set_positions(state, switch, save_pg)
     data = await state.get_data()
     pg_pair : PlayersPair = data['pg_pair']
@@ -693,7 +696,7 @@ async def bot_choose_action(callback: CallbackQuery, state : FSMContext, switch 
     pass_count = data['pass_count']
 
     if(pass_count == 3):
-        await bot_try_dribble(callback, state, pg_pair)
+        await bot_try_dribble(callback, state, pg_pair, db)
         return
 
     chance_to_attack = calculate_chance_to_successful_attack(pg_pair)
@@ -707,11 +710,11 @@ async def bot_choose_action(callback: CallbackQuery, state : FSMContext, switch 
 
     match index:
         case 0:
-            await bot_try_dribble(callback, state, pg_pair)
+            await bot_try_dribble(callback, state, pg_pair, db)
         case 1:
-            await bot_try_pass(callback, state, pg_pair, first_pair)
+            await bot_try_pass(callback, state, pg_pair, first_pair, db)
         case 2:
-            await bot_try_pass(callback, state, pg_pair, second_pair)    
+            await bot_try_pass(callback, state, pg_pair, second_pair, db)
             
 async def end_pass(state : FSMContext, pair : PlayersPair, pass_pair : PlayersPair, is_bot : bool = False) -> str | str | bool:
     data = await state.get_data()
@@ -864,38 +867,30 @@ async def give_reward(reward_dict: dict, user_id: int):
     
     await bot.send_message(user_id, f"🎗Ты получаешь награду за достижение рейтинга : {text}")
 
-async def check_rewards(max_rating: int, new_rating: int, user_id: int):
-    conn = db.connection
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT rating, reward FROM rewards_5v5;")
-    rewards = cursor.fetchall()
-    cursor.close()
+async def check_rewards(max_rating: int, new_rating: int, user_id: int, db: PgSql):
+    rewards = await db.conn.fetch('SELECT rating, reward FROM rewards_5v5')
+
     for reward in rewards:
         if max_rating < reward[0] and new_rating >= reward[0]:
             await give_reward(reward[1], user_id)
             break
 
-async def change_rating(user_id, add_rating):
-    conn = db.connection
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT rating, max_rating FROM user_rating WHERE user_id = {user_id};")
-    res = cursor.fetchone()
-    rating = res[0]
-    max_rating = res[1]
+async def change_rating(user_id, add_rating, db: PgSql):
+    res = await db.conn.fetchrow('SELECT rating, max_rating FROM user_rating WHERE user_id = $1', user_id)
+    rating = res['rating']
+    max_rating = res['max_rating']
     if rating + add_rating > max_rating:                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
-        await check_rewards(max_rating, rating + add_rating, user_id)
-        max_rating = rating + add_rating
-    cursor.execute(f"UPDATE user_rating SET (rating, played_this_season, max_rating) = (GREATEST(rating + {add_rating}, 0), TRUE, GREATEST(max_rating, rating + {add_rating})) WHERE user_id={user_id};")
-    conn.commit()
-    cursor.close()
+        await check_rewards(max_rating, rating + add_rating, user_id, db)
+        max_rating = rating + add_rating # лишнее, в sql пересчитывается
+    await db.conn.execute(f"UPDATE user_rating SET (rating, played_this_season, max_rating) = (GREATEST(rating + {add_rating}, 0), TRUE, GREATEST(max_rating, rating + {add_rating})) WHERE user_id={user_id};")
 
-async def start_player_cycle(callback : CallbackQuery, state : FSMContext, switch : bool, save_pg : bool):
+
+async def start_player_cycle(callback : CallbackQuery, state : FSMContext, switch : bool, save_pg : bool, db: PgSql):
     data = await state.get_data()
     user_id = callback.from_user.id
     await asyncio.sleep(1)
     if(data['cycle'] == max_cycles):
-        conn = db.connection
-        cursor = conn.cursor()
+
         message = f"Конец игры\n\nСчёт: {data['own_score']} - {data['opp_score']}\n"
         add_rating = data['own_score'] - data['opp_score']
         if(data['own_score'] == data['opp_score']):
@@ -909,9 +904,9 @@ async def start_player_cycle(callback : CallbackQuery, state : FSMContext, switc
             message += "Ты проиграл!\n\n"
             await tasks.PerformAction(tasks.games_loosed, user_id)
         await tasks.PerformAction(tasks.games_played, user_id)
-        cursor.execute(f"SELECT rating FROM user_rating WHERE user_id={user_id};")
-        rating = cursor.fetchone()[0]
-        cursor.close()
+
+        rating = await db.conn.fetchval("SELECT rating FROM user_rating WHERE user_id = $1", user_id)
+
         sign = "+"
         if add_rating < 0:
             sign = "-"
@@ -922,7 +917,7 @@ async def start_player_cycle(callback : CallbackQuery, state : FSMContext, switc
         message += f'Изменение рейтинга: {rating} {sign} {abs(add_rating)}🏆'
         logger.info(f"Изменение рейтинга user {user_id} {sign}{add_rating}")
         await bot.send_message(callback.from_user.id, message, reply_markup=keyboards.main_keyboard)
-        await change_rating(callback.from_user.id, add_rating)
+        await change_rating(callback.from_user.id, add_rating, db)
         await state.clear()
     else:
         data['pass_state'] = 'none'
@@ -934,7 +929,7 @@ async def start_player_cycle(callback : CallbackQuery, state : FSMContext, switc
         await send_attack_message(callback.from_user.id, state)
 
 @router.callback_query(F.data.in_({"defense", "attack", "balance"}), StateFilter(Match.ChoosingTactic))
-async def pick_tactic(callback : CallbackQuery, state : FSMContext):
+async def pick_tactic(callback : CallbackQuery, state : FSMContext, db: PgSql):
     data = await state.get_data()
     team : Team = data['att_team']
     team.set_tactic(callback.data)
@@ -942,21 +937,23 @@ async def pick_tactic(callback : CallbackQuery, state : FSMContext):
     await state.update_data(own_score=0, opp_score=0, cycle=0, def_debuff=0)
     await state.set_state(Match.PlayingMatch)
     await callback.message.edit_text(text=f"Ты выбрал {pick_tactic_message[callback.data]} тактику", reply_markup=None)
-    await start_player_cycle(callback, state, False, False)
+    await start_player_cycle(callback, state, False, False, db)
 
 @router.callback_query(F.data == "play_ranked", StateFilter(Match.ChoosingToPlay))
-async def play_ranked(callback : CallbackQuery, state : FSMContext):
-    cursor = db.connection.cursor()
+async def play_ranked(callback : CallbackQuery, state : FSMContext, db: PgSql):
+    """
+    Матч Против бота, НЕ требует зависимости для ТЗ(онлайн пвп"игрок против игрока", а не бот vs игрок)
+    """
     user_id = callback.from_user.id
-    cursor.execute(f"SELECT tickets FROM user_rating WHERE user_id={user_id};")
-    tickets = cursor.fetchone()[0]
+    tickets = await db.conn.fetchval("SELECT tickets FROM user_rating WHERE user_id = $1", user_id)
+
     if(tickets <= 0):
         await callback.answer("Билеты закончились")
         return
-    cursor.execute(f'''WITH target_rank AS (
+    opponents_info = await db.conn.fetch(f'''WITH target_rank AS (
     SELECT rating 
     FROM user_rating 
-    WHERE user_id = {user_id} 
+    WHERE user_id = $1 
 ),
 lower_ranks AS (
     SELECT ur.user_id, ur.rating, ur.defense_tactic
@@ -964,7 +961,7 @@ lower_ranks AS (
 	JOIN user_team ut ON ur.user_id = ut.user_id
     WHERE (ut.PG, ut.PF, ut.C, ut.SF, ut.SG) IS NOT null
 	AND ur.rating <= (SELECT rating FROM target_rank)
-	AND ur.user_id != {user_id}
+	AND ur.user_id != $1
     ORDER BY ur.rating DESC 
     LIMIT 10
 ),
@@ -974,13 +971,13 @@ higher_ranks AS (
 	JOIN user_team ut ON ur.user_id = ut.user_id
     WHERE (ut.PG, ut.PF, ut.C, ut.SF, ut.SG) IS NOT null
 	AND ur.rating > (SELECT rating FROM target_rank)
-	AND ur.user_id != {user_id}
+	AND ur.user_id != $1
     ORDER BY ur.rating ASC 
     LIMIT 10
 )
 SELECT * FROM lower_ranks
 UNION ALL
-SELECT * FROM higher_ranks;''')
+SELECT * FROM higher_ranks''', user_id)
 #     cursor.execute(f'''WITH target_rank AS (
 #     SELECT rating
 #     FROM user_rating
@@ -1009,27 +1006,32 @@ SELECT * FROM higher_ranks;''')
 # SELECT * FROM lower_ranks
 # UNION ALL
 # SELECT * FROM higher_ranks;''')
-    opponents_info = cursor.fetchall()
     if(len(opponents_info) == 0):
+    # if not opponents_info:
         await callback.answer("Недостаточно пользователей")
         return
     await state.set_state(Match.StartedRanked)
     await callback.message.delete()
     message = await bot.send_message(chat_id=user_id, text="Ищем противника...", reply_markup=keyboards.ReplyKeyboardRemove())
-    cursor.execute(f"UPDATE user_rating SET tickets=tickets-1 WHERE user_id={user_id};")
-    db.connection.commit()
-    cursor.close()
+    await db.conn.execute(f"UPDATE user_rating SET tickets = tickets - 1 WHERE user_id = $1", user_id)
+
+
     index = random.randint(0, len(opponents_info) - 1)
     opponent = opponents_info[index]
-    opp_team : Team = Team.get_team_from_user_id(opponent[0])
+    opp_team : Team = await Team.get_team_from_user_id(opponent[0], db)
     opp_team.set_tactic(opponent[2])
     opp_team.set_current_stats_as_base()
-    own_team = Team.get_team_from_user_id(user_id)
+    own_team = await Team.get_team_from_user_id(user_id, db)
     await state.update_data(att_team=own_team, def_team=opp_team, opp_id=opponent[0])
     await asyncio.sleep(2)
     await message.delete()
-    await bot.send_message(chat_id=user_id, text=f"Твой оппонент - {users.get_username(opponent[0])} | {opponent[1]}🏆\n\nКоманда({tactic_message[opponent[2]]}):\n\n{get_team_info(opponent[0])}", parse_mode='html')
+
+    "Превью оппонента"
+    team_info = await get_team_info(opponent[0], db)
+    await bot.send_message(chat_id=user_id, text=f"Твой оппонент - {users.get_username(opponent[0])} | {opponent[1]}🏆\n\nКоманда({tactic_message[opponent[2]]}):\n\n{team_info}", parse_mode='html')
     await asyncio.sleep(2)
+
+    "Пользователь играет(должен выбрать тактику)"
     await state.set_state(Match.ChoosingTactic)
     await bot.send_message(chat_id=user_id, text="Выбери тактику", reply_markup=keyboards.keyboard_choose_tactic)
     await callback.answer()
