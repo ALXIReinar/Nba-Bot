@@ -1,6 +1,6 @@
 
 import app.keyboards as keyboards
-import app.cards as cards
+
 import app.users as users
 
 from app.users import truncate_text
@@ -175,36 +175,10 @@ async def watch_team(callback: CallbackQuery, state : FSMContext, start_pos : st
     await state.update_data(current_pos=start_pos, have=have)
     await choose_player(start_pos, callback, state)
 
-@router.callback_query(F.data.in_(positions), StateFilter(Match.WatchingTeam))
-async def prev(callback : CallbackQuery, state : FSMContext):
-    current_pos = callback.data
-    await state.update_data(current_pos=current_pos)
-    await choose_player(current_pos, callback, state)
 
-@router.callback_query(F.data == "pick", StateFilter(Match.WatchingTeam))
-async def start_picking(callback : CallbackQuery, state: FSMContext):
-    await state.set_state(Match.PickingCategory)
-    data = await state.get_data()
-    have = data['have']
-    keyboard = keyboards.choose_category_except_team_for_user(callback.from_user.id)
-    text = "Выбери категорию"
-    if(have):
-        await callback.message.delete()
-        await bot.send_message(chat_id=callback.from_user.id, text=text, reply_markup=keyboard)
-    else:
-        await callback.message.edit_text(text=text, reply_markup=keyboard)
-
-@router.callback_query(F.data == 'back', StateFilter(Match.PickingCategory))
-async def back_to_team(callback: CallbackQuery, state : FSMContext):
-    data = await state.get_data()
-    current_pos = data["current_pos"]
-    await watch_team(callback, state, current_pos, False)
 
 categories = ['all', 'bronze', 'silver', 'gold', 'legend', 'diamond']
 
-@router.callback_query(F.data.in_(categories), StateFilter(Match.PickingCategory))
-async def show_all(callback: CallbackQuery, state: FSMContext):
-    await pick_category(callback, state, callback.data)
 
 async def choose_player(position: str, callback : CallbackQuery, state : FSMContext):
     """
@@ -225,7 +199,7 @@ async def choose_player(position: str, callback : CallbackQuery, state : FSMCont
     #     photo = cards.get_card_photo(player.card_id)
     #     text = player.to_text(data['tactic'])
     #     mediaPhoto = InputMediaPhoto(media=photo, caption=text, parse_mode='html')
-    
+
     new_keyboard = keyboards.craft_team_keyboard(position, new_have, positions[current_pos - 1], positions[(current_pos + 1) % len(positions)])
     await state.update_data(have=new_have)
     if new_have:
@@ -239,73 +213,7 @@ async def choose_player(position: str, callback : CallbackQuery, state : FSMCont
             await callback.message.edit_text(text=text, reply_markup=new_keyboard)
     # cursor.close()
 
-@router.callback_query(F.data == 'back', StateFilter(Match.ChoosingPlayer))
-async def back_to_category(callback: CallbackQuery, state : FSMContext):
-    await state.update_data(have=True)
-    await start_picking(callback, state)
 
-async def pick_category(callback : CallbackQuery, state : FSMContext, category : str):
-    await state.set_state(Match.ChoosingPlayer)
-    indexes = cards.get_cards_indexes_massive_except_team(callback.from_user.id, category)
-    if(len(indexes) == 0):
-        message = "У тебя нет подходящих карточек("
-        await callback.message.edit_text(message, reply_markup=keyboards.back)
-        return
-    await state.update_data(current_choose=0, indexes=indexes)
-    card_id = cards.get_id_card_from_user(callback.from_user.id, indexes[0])
-    # media = cards.get_card_media(card_info['id'])
-    await image_cache.edit_card_media(callback.from_user.id, callback.message.message_id, card_id, cards.cards_caption[card_id], reply_markup=keyboards.team_cards_keyboard(0, len(indexes)))
-    # await callback.message.edit_media(reply_markup=keyboards.team_cards_keyboard(0, len(indexes)), media=media, parse_mode='html')
-
-@router.callback_query(lambda c: c.data.startswith('prev') or c.data.startswith('next'), StateFilter(Match.ChoosingPlayer))
-async def move(callback: CallbackQuery, state: FSMContext):
-    current_index = int(callback.data.split('_')[1])
-    data = await state.get_data()
-    indexes = data['indexes']
-    card_id = cards.get_id_card_from_user(callback.from_user.id, indexes[current_index])
-    await state.update_data(current_choose=current_index)
-    await image_cache.edit_card_media(callback.from_user.id, callback.message.message_id, card_id, cards.cards_caption[card_id], reply_markup=keyboards.team_cards_keyboard(current_index, len(indexes)))
-
-    # await callback.message.edit_media(reply_markup=keyboards.team_cards_keyboard(current_index, len(indexes)), media=media, parse_mode='html')
-
-@router.callback_query(F.data == "choose", StateFilter(Match.ChoosingPlayer))
-async def pick_player(callback: CallbackQuery, state: FSMContext, db: PgSql):
-    await state.set_state(Match.WatchingTeam)
-    data = await state.get_data()
-    have = data["have"]
-    indexes = data["indexes"]
-    current_pos = data["current_pos"]
-    position = current_pos
-    index = indexes[data["current_choose"]]
-    user_id = callback.from_user.id
-    card_id = cards.get_id_card_from_user(user_id, index)            
-    cards.remove_cards_from_user(user_id, [index])
-    if have:
-        back_to_user = await db.conn.fetchval(f"SELECT {position} FROM user_team WHERE user_id = $1", user_id)
-        if(back_to_user is not None):
-            await cards.add_card(user_id, back_to_user)
-    await db.conn.execute(f"UPDATE user_team SET {position}={card_id} WHERE user_id={user_id};")
-    team : Team = await Team.get_team_from_user_id(callback.from_user.id, db)
-    team.set_tactic(data['tactic'])
-    await state.update_data(team=team)
-    await watch_team(callback, state, current_pos, True)
-
-@router.callback_query(F.data == "remove", StateFilter(Match.WatchingTeam))
-async def remove_player(callback: CallbackQuery, state: FSMContext, db: PgSql):
-    data = await state.get_data()
-    have = data["have"]
-    if not have:
-        return
-    current_pos = data["current_pos"]
-    user_id = callback.from_user.id
-    back_to_user = await db.conn.fetcval(f"SELECT {current_pos} FROM user_team WHERE user_id = $1", user_id)
-    if(back_to_user is not None):
-            await cards.add_card(user_id, back_to_user)
-    await db.conn.execute(f"UPDATE user_team SET {current_pos}=null WHERE user_id={user_id};")
-    team : Team = await Team.get_team_from_user_id(callback.from_user.id, db)
-    team.set_tactic(data['tactic'])
-    await state.update_data(team=team)
-    await watch_team(callback, state, current_pos, True)
 
 @router.callback_query(F.data == "rewards", StateFilter(Match.Main))
 async def rewards(callback: CallbackQuery, state: FSMContext, db: PgSql):
