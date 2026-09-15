@@ -1,32 +1,44 @@
 import asyncio
 
-from aiogram import Dispatcher
 from aiogram.filters import Command
 from asyncpg import create_pool
 from redis.asyncio import Redis
 
-from core.config_dir.config import bot, redis_settings, pool_settings
+from core.config_dir.config import bot, dp, redis_settings, pool_settings
 from core.handlers.middlewares.pg_middleware import PostgresMiddleware
-# from core.handlers.callback_center import callback_factory
+from core.handlers.middlewares.online_match_middleware import OnlineMatchMiddleware
 from core.handlers.start import start_handler, on_startup
-
-dp = Dispatcher()
+from core.handlers.online_5v5.router import router as online_router
+from core.utils.online_timeouts import scheduler
 
 
 async def main():
     """"""
     "PostgreSQL"
     db_pool = await create_pool(**pool_settings)
-    dp.update.middleware.register(PostgresMiddleware(db_pool))
+    db_mware = PostgresMiddleware(db_pool)
+    dp.update.middleware.register(db_mware)
+    # await db_mware.cards_init() # Для заполнения глобальных переменных словарей. Нигде не используются, поэтому выключено
 
     "Redis"
     redis_conn = Redis(**redis_settings, decode_responses=True)
+    await redis_conn.flushall()
+
+    "Middlewares"
+    online_match_mware = OnlineMatchMiddleware()
+    dp.message.middleware.register(online_match_mware)
+    dp.callback_query.middleware.register(online_match_mware)
 
     "Команды"
     dp.message.register(start_handler, Command('start'))
 
     "Коллбэки"
-    # dp.callback_query.register(callback_factory) # Не подключаем, т.к. не имеет отношения к коду этого проекта
+
+    "Роутеры"
+    dp.include_router(online_router)
+
+    "APScheduler"
+    scheduler.start()
 
     dp.startup.register(on_startup)
     try:
@@ -36,6 +48,7 @@ async def main():
             redis=redis_conn,
         )
     finally:
+        scheduler.shutdown()
         await db_pool.close()
         await redis_conn.aclose()
 
