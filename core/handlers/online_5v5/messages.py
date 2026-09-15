@@ -133,7 +133,7 @@ def get_coin_toss_result_message(your_score: int, opponent_score: int) -> str:
     Returns:
         str: Текст сообщения
     """
-    return f"Твой счёт: {your_score}/3\nСчёт соперника: {opponent_score}/3"
+    return f"Твой счёт: <b>{your_score}</b>\nСчёт соперника: <b>{opponent_score}</b>"
 
 
 def get_you_attack_first_message(cycle: int, your_score: int, opponent_score: int) -> str:

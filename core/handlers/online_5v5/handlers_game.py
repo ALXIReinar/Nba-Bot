@@ -31,7 +31,7 @@ from core.utils.online_timeouts import (
 )
 
 
-logger = logging.getLogger(__name__)
+# logging = logging.getlogging(__name__)
 router = Router(name="online_5v5_game")
 
 
@@ -48,7 +48,7 @@ async def start_pvp_attack(match_id: str, redis: Redis, bot_storage=None):
     match_data = await matches_manager.get_match(match_id)
     
     if not match_data:
-        logger.error(f"Match {match_id} not found")
+        logging.error(f"Match {match_id} not found")
         return
     
     cycle = match_data["cycle"]
@@ -110,12 +110,9 @@ async def start_pvp_attack(match_id: str, redis: Redis, bot_storage=None):
     if bot_storage:
         from aiogram.fsm.storage.base import StorageKey
         
-        # Получаем реальные user_id для FSM StorageKey
-        attacker_real_user_id = match_data.get(f"{attacker_key}_real_user_id", attacker_id)
-        defender_real_user_id = match_data.get(f"{defender_key}_real_user_id", defender_id)
-        
-        storage_key_att = StorageKey(bot_id=bot.id, chat_id=attacker_id, user_id=attacker_real_user_id)
-        storage_key_def = StorageKey(bot_id=bot.id, chat_id=defender_id, user_id=defender_real_user_id)
+        # Используем player_id для обоих параметров (работает для любого режима)
+        storage_key_att = StorageKey(bot_id=bot.id, chat_id=attacker_id, user_id=attacker_id)
+        storage_key_def = StorageKey(bot_id=bot.id, chat_id=defender_id, user_id=defender_id)
         
         # Атакующий - PlayingTurn, Защищающийся - WaitingOpponent
         await bot_storage.set_state(key=storage_key_att, state=OnlineMatch.PlayingTurn)
@@ -147,7 +144,7 @@ async def start_pvp_attack(match_id: str, redis: Redis, bot_storage=None):
         waiting_msg.message_id
     )
     
-    logger.info(f"Match {match_id}: Started attack cycle {cycle}, attacker={attacker_id}")
+    logging.info(f"Match {match_id}: Started attack cycle {cycle}, attacker={attacker_id}")
     
 
 

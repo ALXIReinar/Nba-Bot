@@ -20,7 +20,7 @@ from core.handlers.rating_header import Team
 from core.utils.online_timeouts import schedule_turn_timeout
 
 
-logger = logging.getLogger(__name__)
+# logging = logging.getlogging(__name__)
 router = Router(name="online_5v5_requests")
 
 
@@ -56,7 +56,7 @@ async def invite_user_handler(
     sender_match_id = await matches_manager.get_user_match_id(from_user_id)
     
     if sender_match_id:
-        logger.warning(
+        logging.warning(
             f"User {from_user_id} tried to invite while in match {sender_match_id}"
         )
         await message.answer("❌ Ты уже в игре!")
@@ -66,7 +66,7 @@ async def invite_user_handler(
     target_user = await db.users.find_by_username(target_username)
     
     if not target_user:
-        logger.warning(
+        logging.warning(
             f"User {from_user_id} tried to invite non-existent user '{target_username}'"
         )
         await message.answer(
@@ -85,7 +85,7 @@ async def invite_user_handler(
     target_match_id = await matches_manager.get_user_match_id(target_user_id)
     
     if target_match_id:
-        logger.warning(
+        logging.warning(
             f"User {from_user_id} tried to invite {target_user_id} "
             f"who is already in match {target_match_id}"
         )
@@ -115,7 +115,7 @@ async def invite_user_handler(
         await message.answer("❌ Не удалось отправить приглашение. Попробуй позже.")
         return
     
-    logger.info(
+    logging.info(
         f"✅ User {from_user_id} (@{from_username}) invited "
         f"{target_user_id} (@{target_username}) to PvP match"
     )
@@ -128,7 +128,7 @@ async def invite_user_handler(
             reply_markup=pvp_invite_keyboard(from_user_id)
         )
     except Exception as e:
-        logger.error(f"Failed to send invite to {target_user_id}: {e}")
+        logging.error(f"Failed to send invite to {target_user_id}: {e}")
         await message.answer("❌ Не удалось отправить приглашение игроку")
         await matches_manager.delete_match_request(from_user_id, target_user_id)
         return
@@ -156,11 +156,6 @@ async def accept_invite_handler(
     # Парсим from_user_id из callback_data
     from_user_id = int(callback.data.split("_")[2])
     to_user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
-    
-    # Сохраняем реальные user_id для FSM (нужны для StorageKey)
-    # В test_pvp оба игрока - это один и тот же реальный пользователь
-    from_real_user_id = callback.from_user.id  # Реальный user_id (одинаковый для обоих в test_pvp)
-    to_real_user_id = callback.from_user.id    # Реальный user_id получателя
     
     matches_manager = OnlineMatchesManager(redis)
     
@@ -249,15 +244,13 @@ async def accept_invite_handler(
         player1_username=request["from_username"],
         player2_username=request["to_username"],
         player1_team=dict(player1_team),
-        player2_team=dict(player2_team),
-        player1_real_user_id=from_real_user_id,  # Реальный user_id для FSM
-        player2_real_user_id=to_real_user_id     # Реальный user_id для FSM
+        player2_team=dict(player2_team)
     )
     
     # 6. Удаляем запрос
     await matches_manager.delete_match_request(from_user_id, to_user_id)
     
-    logger.info(
+    logging.info(
         f"✅ Match {match_id} created: {from_user_id} vs {to_user_id}"
     )
     
@@ -279,7 +272,7 @@ async def accept_invite_handler(
             reply_markup=pvp_choose_tactic_keyboard()
         )
     except Exception as e:
-        logger.error(f"Failed to send tactic message to {from_user_id}: {e}")
+        logging.error(f"Failed to send tactic message to {from_user_id}: {e}")
     
     # 8. Переводим обоих в состояние выбора тактики
     # Для приглашённого (текущий пользователь)
@@ -290,8 +283,8 @@ async def accept_invite_handler(
     from core.config_dir.config import dp
     
     storage = dp.storage
-    # Используем реальный user_id для FSM
-    key_inviter = StorageKey(bot_id=bot.id, chat_id=from_user_id, user_id=from_real_user_id)
+    # Используем player_id для обоих параметров (работает и для test_pvp, и без него)
+    key_inviter = StorageKey(bot_id=bot.id, chat_id=from_user_id, user_id=from_user_id)
     await storage.set_state(key=key_inviter, state=OnlineMatch.ChoosingTactic)
     
     # 9. Запускаем первый таймаут (2 минуты на выбор тактики)
@@ -324,7 +317,7 @@ async def decline_invite_handler(
     # 2. Удаляем запрос
     await matches_manager.delete_match_request(from_user_id, to_user_id)
     
-    logger.info(
+    logging.info(
         f"User {to_user_id} declined invite from {from_user_id}"
     )
     
@@ -337,7 +330,7 @@ async def decline_invite_handler(
             pvp_messages.get_invite_declined_message(target_username)
         )
     except Exception as e:
-        logger.error(f"Failed to send decline notification to {from_user_id}: {e}")
+        logging.error(f"Failed to send decline notification to {from_user_id}: {e}")
     
     # 4. Обновляем сообщение для получателя
     await callback.message.edit_text("❌ Ты отклонил приглашение")

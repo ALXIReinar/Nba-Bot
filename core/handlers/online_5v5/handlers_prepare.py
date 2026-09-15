@@ -9,7 +9,8 @@ from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, Dice
+from aiogram.types.dice import DiceEmoji
 from redis.asyncio import Redis
 
 from core.config_dir.config import bot, env, dp
@@ -19,7 +20,7 @@ from core.handlers.online_5v5.keyboards import pvp_choose_tactic_keyboard
 from core.handlers.online_5v5.states import OnlineMatch
 
 
-logger = logging.getLogger(__name__)
+# logging = logging.getlogging(__name__)
 router = Router(name="online_5v5_prepare")
 
 
@@ -82,25 +83,26 @@ async def choose_tactic_pvp(
 
     if match_data["player1_tactic"] and match_data["player2_tactic"]:
         # Оба выбрали - запускаем монетку
-        logger.info(f"Match {match_id}: Both players chose tactics, starting coin toss")
+        logging.info(f"Match {match_id}: Both players chose tactics, starting coin toss")
         
-        # Обновляем состояние матча
+        # ЗАЩИТА ОТ RACE CONDITION: проверяем, что монетка ещё не запущена
+        if match_data["state"] != "waiting_tactic":
+            logging.info(f"Match {match_id}: Coin toss already started, skipping")
+            return
+        
+        # Обновляем состояние матча СРАЗУ, чтобы второй callback не запустил монетку повторно
         await matches_manager.update_match(match_id, {"state": "coin_toss"})
         
         # Переводим обоих в состояние просмотра монетки (через storage напрямую)
         player1_id = match_data["player1_id"]
         player2_id = match_data["player2_id"]
         
-        # Получаем РЕАЛЬНЫЕ user_id для FSM StorageKey (важно для test_pvp!)
-        player1_real_user_id = match_data.get("player1_real_user_id", player1_id)
-        player2_real_user_id = match_data.get("player2_real_user_id", player2_id)
-        
         # Создаём FSMContext для обоих игроков
-        # Для FSM нужны реальные user_id, а chat_id - это ID чатов (для test_pvp могут различаться)
+        # Используем player_id для обоих параметров (работает для любого режима)
         storage = dp.storage
 
-        key_p1 = StorageKey(bot_id=bot.id, chat_id=player1_id, user_id=player1_real_user_id)
-        key_p2 = StorageKey(bot_id=bot.id, chat_id=player2_id, user_id=player2_real_user_id)
+        key_p1 = StorageKey(bot_id=bot.id, chat_id=player1_id, user_id=player1_id)
+        key_p2 = StorageKey(bot_id=bot.id, chat_id=player2_id, user_id=player2_id)
         
         await storage.set_state(key=key_p1, state=OnlineMatch.WatchingCoinToss)
         await storage.set_state(key=key_p2, state=OnlineMatch.WatchingCoinToss)
@@ -155,19 +157,19 @@ async def coin_toss(
     player2_score = 0
     
     for i in range(3):
-        # Рандом для каждого игрока
-        p1_result = random.choice([True, False])  # True = попал
-        p2_result = random.choice([True, False])
-        
-        player1_score += 1 if p1_result else 0
-        player2_score += 1 if p2_result else 0
-        
-        emoji_p1 = "🏀✅" if p1_result else "🏀❌"
-        emoji_p2 = "🏀✅" if p2_result else "🏀❌"
-        
-        await bot.send_message(player1_id, f"Бросок {i+1}: {emoji_p1}")
-        await bot.send_message(player2_id, f"Бросок {i+1}: {emoji_p2}")
-        
+
+        "Отправляем стикер 'Бросок в кольцо'"
+        dice_p1 = await bot.send_dice(player1_id, emoji=DiceEmoji.BASKETBALL)
+        dice_p2 = await bot.send_dice(player2_id, emoji=DiceEmoji.BASKETBALL)
+
+        # От тг узнаём, какая анимация была(промах/попадание)
+        # Чем лучше бросок, тем больше очков даётся
+        if dice_p1.dice.value >= 4:
+            player1_score += dice_p1.dice.value - 2
+
+        if dice_p2.dice.value >= 4:
+            player2_score += dice_p2.dice.value - 2
+
         await asyncio.sleep(2)
     
     # 3. Итоги
@@ -204,7 +206,7 @@ async def coin_toss(
     await bot.send_message(player1_id, result_msg_p1)
     await bot.send_message(player2_id, result_msg_p2)
     
-    logger.info(
+    logging.info(
         f"Match {match_id}: Coin toss completed. "
         f"First attacker: {first_attacker_id} "
         f"(scores: P1={player1_score}, P2={player2_score})"
