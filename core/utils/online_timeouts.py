@@ -18,6 +18,41 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 
 
+def determine_winner_on_tactic_timeout(match_data: dict) -> tuple[int, int]:
+    """
+    Определяет победителя и проигравшего при таймауте выбора тактики.
+    
+    Логика:
+    - Если оба не выбрали тактику → проигрывает приглашённый (player2)
+    - Если только player1 не выбрал → проигрывает player1
+    - Если только player2 не выбрал → проигрывает player2
+    - Если оба выбрали (не должно случиться) → проигрывает player2
+    
+    Args:
+        match_data: Данные матча
+        
+    Returns:
+        tuple[winner_id, loser_id]
+    """
+    player1_id = match_data["player1_id"]
+    player2_id = match_data["player2_id"]
+    
+    player1_tactic = match_data.get("player1_tactic")
+    player2_tactic = match_data.get("player2_tactic")
+    
+    # Если player1 выбрал, а player2 нет
+    if player1_tactic and not player2_tactic:
+        return player1_id, player2_id
+    
+    # Если player2 выбрал, а player1 нет
+    if player2_tactic and not player1_tactic:
+        return player2_id, player1_id
+    
+    # Если оба не выбрали (или оба выбрали - не должно случиться)
+    # Проигрывает приглашённый (player2)
+    return player1_id, player2_id
+
+
 async def check_turn_timeout(match_id: str, turn_number: int, redis: Redis):
     """
     Проверяет, не истёк ли таймаут хода.
@@ -38,17 +73,26 @@ async def check_turn_timeout(match_id: str, turn_number: int, redis: Redis):
     # Проверяем, совпадает ли turn_number
     if match_data["turn_number"] == turn_number:
         # Ход не был сделан за 2 минуты — засчитываем поражение
-        loser_id = match_data["current_attacker_id"]
-        winner_id = (
-            match_data["player2_id"] 
-            if loser_id == match_data["player1_id"] 
-            else match_data["player1_id"]
-        )
         
-        logger.warning(
-            f"Match {match_id}: timeout for turn {turn_number}. "
-            f"Winner: {winner_id}, Loser: {loser_id}"
-        )
+        # Специальная логика для turn_number = 0 (выбор тактики)
+        if turn_number == 0:
+            winner_id, loser_id = determine_winner_on_tactic_timeout(match_data)
+            logger.warning(
+                f"Match {match_id}: tactic selection timeout. "
+                f"Winner: {winner_id}, Loser: {loser_id}"
+            )
+        else:
+            # Обычная логика для игрового хода
+            loser_id = match_data["current_attacker_id"]
+            winner_id = (
+                match_data["player2_id"] 
+                if loser_id == match_data["player1_id"] 
+                else match_data["player1_id"]
+            )
+            logger.warning(
+                f"Match {match_id}: timeout for turn {turn_number}. "
+                f"Winner: {winner_id}, Loser: {loser_id}"
+            )
         
         await finish_match_by_timeout(match_id, winner_id, loser_id, redis)
     else:
@@ -140,19 +184,35 @@ async def finish_match_by_timeout(
         else final_score["player2"]
     )
     
-    winner_message = (
-        f"🏆 <b>Победа по таймауту!</b>\n\n"
-        f"Соперник @{loser_username} не сделал ход за 2 минуты.\n\n"
-        f"<b>Итоговый счёт:</b> {winner_score} - {loser_score}\n\n"
-        f"Матч не влияет на рейтинг."
-    )
-    
-    loser_message = (
-        f"⏱ <b>Поражение по таймауту</b>\n\n"
-        f"Ты не успел сделать ход за 2 минуты.\n\n"
-        f"<b>Итоговый счёт:</b> {loser_score} - {winner_score}\n\n"
-        f"Матч не влияет на рейтинг."
-    )
+    # Разные сообщения для таймаута выбора тактики и игрового хода
+    if match_data["turn_number"] == 0:
+        # Таймаут выбора тактики
+        winner_message = (
+            f"🏆 <b>Победа по таймауту!</b>\n\n"
+            f"Соперник @{loser_username} не выбрал тактику за 2 минуты.\n\n"
+            f"Матч не влияет на рейтинг."
+        )
+        
+        loser_message = (
+            f"⏱ <b>Поражение по таймауту</b>\n\n"
+            f"Ты не выбрал тактику за 2 минуты.\n\n"
+            f"Матч не влияет на рейтинг."
+        )
+    else:
+        # Таймаут игрового хода
+        winner_message = (
+            f"🏆 <b>Победа по таймауту!</b>\n\n"
+            f"Соперник @{loser_username} не сделал ход за 2 минуты.\n\n"
+            f"<b>Итоговый счёт:</b> {winner_score} - {loser_score}\n\n"
+            f"Матч не влияет на рейтинг."
+        )
+        
+        loser_message = (
+            f"⏱ <b>Поражение по таймауту</b>\n\n"
+            f"Ты не успел сделать ход за 2 минуты.\n\n"
+            f"<b>Итоговый счёт:</b> {loser_score} - {winner_score}\n\n"
+            f"Матч не влияет на рейтинг."
+        )
     
     try:
         await bot.send_message(winner_id, winner_message)

@@ -95,10 +95,16 @@ class OnlineMatchesManager:
         player1_username: str,
         player2_username: str,
         player1_team: dict,
-        player2_team: dict
+        player2_team: dict,
+        player1_real_user_id: int = None,
+        player2_real_user_id: int = None
     ) -> str:
         """
         Создать новый матч.
+        
+        Args:
+            player1_real_user_id: Реальный user_id игрока 1 (для FSM, может отличаться от player1_id в test_pvp)
+            player2_real_user_id: Реальный user_id игрока 2 (для FSM, может отличаться от player2_id в test_pvp)
         
         Returns:
             str: match_id (UUID)
@@ -109,6 +115,8 @@ class OnlineMatchesManager:
             "match_id": match_id,
             "player1_id": player1_id,
             "player2_id": player2_id,
+            "player1_real_user_id": player1_real_user_id or player1_id,  # Для FSM StorageKey
+            "player2_real_user_id": player2_real_user_id or player2_id,  # Для FSM StorageKey
             "player1_username": player1_username,
             "player2_username": player2_username,
             "state": "waiting_tactic",  # waiting_tactic | coin_toss | playing | finished

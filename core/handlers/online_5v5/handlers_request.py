@@ -50,7 +50,6 @@ async def invite_user_handler(
     from_user_id = message.chat.id if env.test_pvp else message.from_user.id
 
     from_username = message.from_user.username or "Аноним"
-    logger.warning(f'\033[36m{from_user_id}\033[0m')
     
     # 2. Проверяем, что отправитель не в игре
     matches_manager = OnlineMatchesManager(redis)
@@ -158,6 +157,11 @@ async def accept_invite_handler(
     from_user_id = int(callback.data.split("_")[2])
     to_user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
     
+    # Сохраняем реальные user_id для FSM (нужны для StorageKey)
+    # В test_pvp оба игрока - это один и тот же реальный пользователь
+    from_real_user_id = callback.from_user.id  # Реальный user_id (одинаковый для обоих в test_pvp)
+    to_real_user_id = callback.from_user.id    # Реальный user_id получателя
+    
     matches_manager = OnlineMatchesManager(redis)
     
     # 1. Проверяем, что запрос ещё существует
@@ -188,7 +192,7 @@ async def accept_invite_handler(
     # 3. Получаем команды обоих игроков
     player1_team_obj = await Team.get_team_from_user_id(from_user_id, db)
     player2_team_obj = await Team.get_team_from_user_id(to_user_id, db)
-    
+
     # Проверяем, что команды полные
     if None in player1_team_obj.players:
         await callback.answer(
@@ -245,7 +249,9 @@ async def accept_invite_handler(
         player1_username=request["from_username"],
         player2_username=request["to_username"],
         player1_team=dict(player1_team),
-        player2_team=dict(player2_team)
+        player2_team=dict(player2_team),
+        player1_real_user_id=from_real_user_id,  # Реальный user_id для FSM
+        player2_real_user_id=to_real_user_id     # Реальный user_id для FSM
     )
     
     # 6. Удаляем запрос
@@ -276,7 +282,17 @@ async def accept_invite_handler(
         logger.error(f"Failed to send tactic message to {from_user_id}: {e}")
     
     # 8. Переводим обоих в состояние выбора тактики
+    # Для приглашённого (текущий пользователь)
     await state.set_state(OnlineMatch.ChoosingTactic)
+    
+    # Для приглашающего нужно установить state отдельно через StorageKey!
+    from aiogram.fsm.storage.base import StorageKey
+    from core.config_dir.config import dp
+    
+    storage = dp.storage
+    # Используем реальный user_id для FSM
+    key_inviter = StorageKey(bot_id=bot.id, chat_id=from_user_id, user_id=from_real_user_id)
+    await storage.set_state(key=key_inviter, state=OnlineMatch.ChoosingTactic)
     
     # 9. Запускаем первый таймаут (2 минуты на выбор тактики)
     schedule_turn_timeout(match_id, 0, redis)

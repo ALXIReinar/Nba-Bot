@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 
-from core.config_dir.config import bot
+from core.config_dir.config import bot, env
 from core.config_dir.img_cache import image_cache
 from core.data.postgres import PgSql
 from core.data.sql_queries import users
@@ -341,7 +341,7 @@ async def send_attack_message(user_id, state : FSMContext):
         await send_dribble_message(user_id, pg_pair.attacker, pg_pair.defender, pg_pair.position, opp_def)
 
 async def send_start_player_attack_message(callback : CallbackQuery, state : FSMContext):
-    user_id = callback.from_user.id
+    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
     data = await state.get_data()
     own_score = data['own_score']
     opp_score = data['opp_score']
@@ -350,7 +350,7 @@ async def send_start_player_attack_message(callback : CallbackQuery, state : FSM
 
 @router.callback_query(F.data.in_({'1', '2', '3'}), Match.PlayingMatch)
 async def edit_message(callback : CallbackQuery, state : FSMContext):
-    user_id = callback.from_user.id
+    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
 
     if(users.is_user_actions_locked(user_id)):
         await callback.answer("Подожди 30 сек")
@@ -554,7 +554,7 @@ def calculate_goodness_pass(pg_pair: PlayersPair, pass_pair: PlayersPair) -> flo
 
 @router.callback_query(F.data == 'run')
 async def run(callback : CallbackQuery, state : FSMContext, db: PgSql):
-    user_id = callback.from_user.id
+    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
 
     if(users.is_user_actions_locked(user_id)):
         await callback.answer("Подожди 30 сек")
@@ -571,7 +571,7 @@ async def run(callback : CallbackQuery, state : FSMContext, db: PgSql):
         logger.error("Ошибка смены фотки")
 
     try:
-        user_id = callback.from_user.id
+        # user_id уже определён в начале функции
         if(data['action'] == 1):
             first_msg, action_msg, success_msg, score = await end_attack(pg_pair, False)
             if(score >= 0):
@@ -644,13 +644,14 @@ async def run(callback : CallbackQuery, state : FSMContext, db: PgSql):
         users.unlock_user_actions(user_id)
 
 async def bot_try_pass(callback: CallbackQuery, state: FSMContext, pg_pair : PlayersPair, pass_pair : PlayersPair, db: PgSql):
+    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
     message = get_pass_message(pg_pair, pass_pair)
-    await image_cache.send_card(callback.from_user.id, pg_pair.attacker.card_id, '🤖' + message)
+    await image_cache.send_card(user_id, pg_pair.attacker.card_id, '🤖' + message)
 
     await asyncio.sleep(2)
 
     first_msg, suc_msg, success = await end_pass(state, pg_pair, pass_pair, True)
-    await safe_send(bot, callback.from_user.id, first_msg + suc_msg, user_id=callback.from_user.id)
+    await safe_send(bot, user_id, first_msg + suc_msg, user_id=user_id)
     await asyncio.sleep(1)
 
     if(success):
@@ -660,22 +661,23 @@ async def bot_try_pass(callback: CallbackQuery, state: FSMContext, pg_pair : Pla
 
 
 async def bot_try_dribble(callback: CallbackQuery, state: FSMContext, pair : PlayersPair, db: PgSql):
+    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
     data = await state.get_data()
 
     opp_def = pair.defender.get_interior_def() if pair.position == 'interior' else pair.defender.get_perimetr_def()
     message = get_dribble_message(pair.attacker, pair.defender, pair.position, opp_def)
-    await image_cache.send_card(callback.from_user.id, pair.attacker.card_id, '🤖' + message)
+    await image_cache.send_card(user_id, pair.attacker.card_id, '🤖' + message)
     await asyncio.sleep(2)
 
     first_msg, action_msg, suc_msg, score = await end_attack(pair, True)
-    await safe_send(bot, callback.from_user.id, first_msg + action_msg + suc_msg, user_id=callback.from_user.id)
+    await safe_send(bot, user_id, first_msg + action_msg + suc_msg, user_id=user_id)
     await asyncio.sleep(2)
 
     if score >= 0:
         await state.update_data(opp_score=data['opp_score'] + score, def_debuff=0)
         await start_player_cycle(callback, state, True, False, db)
     else:
-        await bot.send_message(callback.from_user.id, f'🤖Проход не удался!\n\nМяч перехвачен, защита снижена на 10%')
+        await bot.send_message(user_id, f'🤖Проход не удался!\n\nМяч перехвачен, защита снижена на 10%')
         await state.update_data(def_debuff=0.1)
         await start_player_cycle(callback, state, True, True, db)
 
@@ -884,7 +886,7 @@ async def change_rating(user_id, add_rating, db: PgSql):
 
 async def start_player_cycle(callback : CallbackQuery, state : FSMContext, switch : bool, save_pg : bool, db: PgSql):
     data = await state.get_data()
-    user_id = callback.from_user.id
+    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
     await asyncio.sleep(1)
     if(data['cycle'] == max_cycles):
 
@@ -913,8 +915,8 @@ async def start_player_cycle(callback : CallbackQuery, state : FSMContext, switc
         
         message += f'Изменение рейтинга: {rating} {sign} {abs(add_rating)}🏆'
         logger.info(f"Изменение рейтинга user {user_id} {sign}{add_rating}")
-        await bot.send_message(callback.from_user.id, message, reply_markup=keyboards.main_keyboard)
-        await change_rating(callback.from_user.id, add_rating, db)
+        await bot.send_message(user_id, message, reply_markup=keyboards.main_keyboard)
+        await change_rating(user_id, add_rating, db)
         await state.clear()
     else:
         data['pass_state'] = 'none'
@@ -923,7 +925,7 @@ async def start_player_cycle(callback : CallbackQuery, state : FSMContext, switc
         await state.update_data(data)
         await send_start_player_attack_message(callback, state)
         await set_positions(state, switch, save_pg)
-        await send_attack_message(callback.from_user.id, state)
+        await send_attack_message(user_id, state)
 
 @router.callback_query(F.data.in_({"defense", "attack", "balance"}), StateFilter(Match.ChoosingTactic))
 async def pick_tactic(callback : CallbackQuery, state : FSMContext, db: PgSql):
@@ -941,7 +943,7 @@ async def play_ranked(callback : CallbackQuery, state : FSMContext, db: PgSql):
     """
     Матч Против бота, НЕ требует зависимости для ТЗ(онлайн пвп"игрок против игрока", а не бот vs игрок)
     """
-    user_id = callback.from_user.id
+    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
     tickets = await db.conn.fetchval("SELECT tickets FROM user_rating WHERE user_id = $1", user_id)
 
     if(tickets <= 0):

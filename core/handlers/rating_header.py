@@ -278,7 +278,6 @@ class Team:
         # team_ids = await db.conn.fetchrow(f"SELECT {positions[0]}, {positions[1]}, {positions[2]}, {positions[3]}, {positions[4]} FROM user_team WHERE user_id={user_id};")
         team_ids = await db.conn.fetchrow(f"SELECT {', '.join(positions)} FROM user_team WHERE user_id = $1", user_id)
 
-        print(f'\033[31m{team_ids}\033[0m')
         team_players = []
         for i in range(len(positions)):
             # if(team_ids[i] == None):

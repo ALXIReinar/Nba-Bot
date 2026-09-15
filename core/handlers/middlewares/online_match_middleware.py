@@ -5,6 +5,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 from redis.asyncio import Redis
 
+from core.config_dir.config import env
 from core.data.online_matches_manager import OnlineMatchesManager
 from core.utils.online_timeouts import finish_match_by_exit
 
@@ -46,9 +47,9 @@ class OnlineMatchMiddleware(BaseMiddleware):
         # Получаем user_id
         user_id = None
         if isinstance(event, Message):
-            user_id = event.from_user.id
+            user_id = event.from_user.id if not env.test_pvp else event.chat.id
         elif isinstance(event, CallbackQuery):
-            user_id = event.from_user.id
+            user_id = event.from_user.id if not env.test_pvp else event.message.chat.id
         
         if not user_id:
             return await handler(event, data)

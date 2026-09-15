@@ -8,15 +8,15 @@ import random
 from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
 from aiogram.types import CallbackQuery
 from redis.asyncio import Redis
 
-from core.config_dir.config import bot, env
+from core.config_dir.config import bot, env, dp
 from core.data.online_matches_manager import OnlineMatchesManager
 from core.handlers.online_5v5 import messages as pvp_messages
 from core.handlers.online_5v5.keyboards import pvp_choose_tactic_keyboard
 from core.handlers.online_5v5.states import OnlineMatch
-from core.utils.online_timeouts import schedule_turn_timeout
 
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,8 @@ async def choose_tactic_pvp(
     Когда оба игрока выбрали тактику - запускаем "монетку".
     """
     user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    logging.info(f"User ID: {user_id} | 40: handlers_prepare")
+
     matches_manager = OnlineMatchesManager(redis)
     
     # 1. Получаем match_id пользователя
@@ -66,9 +68,9 @@ async def choose_tactic_pvp(
     tactic_field = f"{player_key}_tactic"
     
     await matches_manager.update_match(match_id, {tactic_field: tactic})
-    
-    logger.info(f"Match {match_id}: {player_key} chose tactic '{tactic}'")
-    
+
+    logging.info(f"Match {match_id}: {player_key} chose tactic '{tactic}'")
+
     # 5. Обновляем клавиатуру с выбранной тактикой
     await callback.message.edit_reply_markup(
         reply_markup=pvp_choose_tactic_keyboard(tactic)
@@ -77,7 +79,7 @@ async def choose_tactic_pvp(
     
     # 6. Проверяем, выбрали ли оба игрока тактику
     match_data = await matches_manager.get_match(match_id)
-    
+
     if match_data["player1_tactic"] and match_data["player2_tactic"]:
         # Оба выбрали - запускаем монетку
         logger.info(f"Match {match_id}: Both players chose tactics, starting coin toss")
@@ -86,16 +88,19 @@ async def choose_tactic_pvp(
         await matches_manager.update_match(match_id, {"state": "coin_toss"})
         
         # Переводим обоих в состояние просмотра монетки (через storage напрямую)
-        from aiogram.fsm.storage.base import StorageKey
-        from core.config_dir.config import dp
-        
         player1_id = match_data["player1_id"]
         player2_id = match_data["player2_id"]
         
+        # Получаем РЕАЛЬНЫЕ user_id для FSM StorageKey (важно для test_pvp!)
+        player1_real_user_id = match_data.get("player1_real_user_id", player1_id)
+        player2_real_user_id = match_data.get("player2_real_user_id", player2_id)
+        
         # Создаём FSMContext для обоих игроков
+        # Для FSM нужны реальные user_id, а chat_id - это ID чатов (для test_pvp могут различаться)
         storage = dp.storage
-        key_p1 = StorageKey(bot_id=bot.id, chat_id=player1_id, user_id=player1_id)
-        key_p2 = StorageKey(bot_id=bot.id, chat_id=player2_id, user_id=player2_id)
+
+        key_p1 = StorageKey(bot_id=bot.id, chat_id=player1_id, user_id=player1_real_user_id)
+        key_p2 = StorageKey(bot_id=bot.id, chat_id=player2_id, user_id=player2_real_user_id)
         
         await storage.set_state(key=key_p1, state=OnlineMatch.WatchingCoinToss)
         await storage.set_state(key=key_p2, state=OnlineMatch.WatchingCoinToss)

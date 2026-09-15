@@ -14,7 +14,6 @@ from core.data.sql_queries import users
 from core.handlers.online_5v5 import messages as pvp_messages
 from core.handlers.online_5v5.game_logic import (
     deserialize_team,
-    serialize_team,
     apply_tactic_to_team,
     set_positions_for_pvp,
     execute_attack_action,
@@ -111,8 +110,12 @@ async def start_pvp_attack(match_id: str, redis: Redis, bot_storage=None):
     if bot_storage:
         from aiogram.fsm.storage.base import StorageKey
         
-        storage_key_att = StorageKey(bot_id=bot.id, chat_id=attacker_id, user_id=attacker_id)
-        storage_key_def = StorageKey(bot_id=bot.id, chat_id=defender_id, user_id=defender_id)
+        # Получаем реальные user_id для FSM StorageKey
+        attacker_real_user_id = match_data.get(f"{attacker_key}_real_user_id", attacker_id)
+        defender_real_user_id = match_data.get(f"{defender_key}_real_user_id", defender_id)
+        
+        storage_key_att = StorageKey(bot_id=bot.id, chat_id=attacker_id, user_id=attacker_real_user_id)
+        storage_key_def = StorageKey(bot_id=bot.id, chat_id=defender_id, user_id=defender_real_user_id)
         
         # Атакующий - PlayingTurn, Защищающийся - WaitingOpponent
         await bot_storage.set_state(key=storage_key_att, state=OnlineMatch.PlayingTurn)
@@ -345,6 +348,7 @@ async def pvp_execute_action(callback: CallbackQuery, state: FSMContext, redis: 
     
     finally:
         users.unlock_user_actions(user_id)
+        await callback.answer()
 
 
 async def execute_pvp_attack(match_id: str, callback: CallbackQuery, redis: Redis):
@@ -458,12 +462,15 @@ async def execute_pvp_pass(
         apply_tactic_to_team(att_team, match_data[f"{attacker_key}_tactic"])
         apply_tactic_to_team(def_team, match_data[f"{defender_key}_tactic"])
         
+        # Получаем текущий def_debuff из game_state
+        current_def_debuff = match_data["game_state"].get("def_debuff", 0)
+        
         # Устанавливаем новые позиции (с сохранением pg = pass_pair.attacker)
         pg_pair_new, first_pair_new, second_pair_new = set_positions_for_pvp(
             att_team,
             def_team,
             pass_state=pass_state,
-            def_debuff=match_data["def_debuff"],
+            def_debuff=current_def_debuff,
             save_pg=True,
             pg_pair=pass_pair  # Мяч теперь у получателя паса
         )
@@ -474,7 +481,7 @@ async def execute_pvp_pass(
             "first_pair": serialize_player_pair(first_pair_new),
             "second_pair": serialize_player_pair(second_pair_new),
             "pass_state": pass_state,
-            "def_debuff": match_data["def_debuff"],
+            "def_debuff": current_def_debuff,
             "current_action": 1
         }
         
