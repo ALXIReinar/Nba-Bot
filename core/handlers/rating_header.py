@@ -6,6 +6,7 @@ from aiogram.fsm.state import StatesGroup, State
 import copy
 
 from core.data.postgres import PgSql
+from core.utils.anything import categories
 
 
 class Match(StatesGroup):
@@ -69,7 +70,7 @@ class PlayerInfo(object):
     def __init__(self, card_id: int, position : int, category : str, name : str, stats : PlayerStats, team_name : str, positions : str):
         self.card_id = card_id
         self.category = category
-        self.name = cards.categories[self.category].emoji + name
+        self.name = categories[self.category].emoji + name
         self.base_stats = stats
         self.current_stats = copy.copy(stats)
         self.team_name = team_name
@@ -276,6 +277,8 @@ class Team:
     async def get_team_from_user_id(user_id, db: PgSql):
         # team_ids = await db.conn.fetchrow(f"SELECT {positions[0]}, {positions[1]}, {positions[2]}, {positions[3]}, {positions[4]} FROM user_team WHERE user_id={user_id};")
         team_ids = await db.conn.fetchrow(f"SELECT {', '.join(positions)} FROM user_team WHERE user_id = $1", user_id)
+
+        print(f'\033[31m{team_ids}\033[0m')
         team_players = []
         for i in range(len(positions)):
             # if(team_ids[i] == None):

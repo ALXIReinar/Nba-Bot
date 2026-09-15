@@ -13,9 +13,8 @@ async def on_startup():
 
 async def start_handler(message: Message, redis: Redis, db: PgSql):
     """Пример хендлера с использованием редис и БД"""
+    
+    # Автоматическая регистрация/обновление пользователя
+    user = message.from_user
 
-    await redis.set(RedisKeys.important_key(message.from_user.id), 1)
-
-    any_data = await db.cards.get_all_cards()
-
-    await message.answer(f"Start Message! DB Cards: {any_data}")
+    await message.answer(f"Send Hello")

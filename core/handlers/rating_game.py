@@ -1,7 +1,3 @@
-# import app.dataBase as db
-import app.keyboards as keyboards
-import app.users as users
-import app.cards as cards
 import random
 import asyncio
 import logging as logger
@@ -14,12 +10,13 @@ from aiogram.fsm.context import FSMContext
 
 from aiogram.types import Message
 
-import app.handlers.crosstep.tasks as tasks
 
 from core.config_dir.config import bot
+from core.config_dir.img_cache import image_cache
 from core.data.postgres import PgSql
+from core.data.sql_queries import users
 from core.handlers.rating_header import PlayerInfo, Team, positions, tactic_message, pick_tactic_message, PlayersPair, platform_position_emoji, Match
-
+from core.utils import keyboards
 
 router = Router()
 
@@ -64,10 +61,10 @@ from aiogram.exceptions import TelegramNetworkError
 from python_socks import ProxyError
 
 
-async def safe_send(bot, *args, user_id: int, **kwargs) -> Message | bool:
+async def safe_send(bot_, *args, user_id: int, **kwargs) -> Message | bool:
     for attempt in range(3):
         try:
-            message = await bot.send_message(*args, **kwargs)
+            message = await bot_.send_message(*args, **kwargs)
             return message, True
 
         except (ProxyError, TelegramNetworkError) as e:
@@ -155,15 +152,15 @@ async def get_team_info(user_id, db: PgSql) -> str:
 
     result = "<code>"
     result += "C:  "
-    result += cards.get_card_name(team[0]) + "\n"
+    result += await db.cards.get_card_name(team[0]) + "\n"
     result += "PG: "
-    result += cards.get_card_name(team[1]) + "\n"
+    result += await db.cards.get_card_name(team[1]) + "\n"
     result += "PF: "
-    result += cards.get_card_name(team[2]) + "\n"
+    result += await db.cards.get_card_name(team[2]) + "\n"
     result += "SG: "
-    result += cards.get_card_name(team[3]) + "\n"
+    result += await db.cards.get_card_name(team[3]) + "\n"
     result += "SF: "
-    result += cards.get_card_name(team[4]) + "</code>"
+    result += await db.cards.get_card_name(team[4]) + "</code>"
     return result
 
 def get_pg_player(team : list[PlayerInfo]):
@@ -602,7 +599,7 @@ async def run(callback : CallbackQuery, state : FSMContext, db: PgSql):
                     msg, suc = await safe_send(
                         bot,
                         user_id,
-                        first_msg + action_msg + success,
+                        first_msg + action_msg + suc,
                         user_id=user_id,
                     )
                 await asyncio.sleep(1)
@@ -611,7 +608,7 @@ async def run(callback : CallbackQuery, state : FSMContext, db: PgSql):
                         user_id, f"Команда соперника нападает!\n\nСчёт: {data['own_score'] + score} - {data['opp_score']}",
                         user_id=user_id,
                     )
-                await start_bot_attack(callback, state, False)
+                await start_bot_attack(callback, state, False, db)
             else:
                 await safe_send(
                         bot,
@@ -619,7 +616,7 @@ async def run(callback : CallbackQuery, state : FSMContext, db: PgSql):
                         user_id=user_id,
                     )
                 await state.update_data(def_debuff=0.1)
-                await start_bot_attack(callback, state, True)
+                await start_bot_attack(callback, state, True, db)
         else:
             pass_pair : PlayersPair = None
             if(data['action'] == 2):
@@ -898,12 +895,12 @@ async def start_player_cycle(callback : CallbackQuery, state : FSMContext, switc
         elif(data['own_score'] > data['opp_score']):
             add_rating += 10
             message += "Ты победил!\n\n"
-            await tasks.PerformAction(tasks.games_winned, user_id)
+            # await tasks.PerformAction(tasks.games_winned, user_id)
         else:
             add_rating += -10
             message += "Ты проиграл!\n\n"
-            await tasks.PerformAction(tasks.games_loosed, user_id)
-        await tasks.PerformAction(tasks.games_played, user_id)
+            # await tasks.PerformAction(tasks.games_loosed, user_id)
+        # await tasks.PerformAction(tasks.games_played, user_id)
 
         rating = await db.conn.fetchval("SELECT rating FROM user_rating WHERE user_id = $1", user_id)
 
@@ -1028,7 +1025,7 @@ SELECT * FROM higher_ranks''', user_id)
 
     "Превью оппонента"
     team_info = await get_team_info(opponent[0], db)
-    await bot.send_message(chat_id=user_id, text=f"Твой оппонент - {users.get_username(opponent[0])} | {opponent[1]}🏆\n\nКоманда({tactic_message[opponent[2]]}):\n\n{team_info}", parse_mode='html')
+    await bot.send_message(chat_id=user_id, text=f"Твой оппонент - {await db.users.get_username(opponent[0])} | {opponent[1]}🏆\n\nКоманда({tactic_message[opponent[2]]}):\n\n{team_info}", parse_mode='html')
     await asyncio.sleep(2)
 
     "Пользователь играет(должен выбрать тактику)"

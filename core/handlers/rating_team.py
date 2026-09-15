@@ -1,10 +1,5 @@
 
-import app.keyboards as keyboards
 
-import app.users as users
-
-from app.users import truncate_text
-from app.bot import image_cache
 from core.config_dir.config import bot
 
 from aiogram.types import LinkPreviewOptions
@@ -15,8 +10,14 @@ from aiogram.types import CallbackQuery
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 
+from core.config_dir.img_cache import image_cache
 from core.data.postgres import PgSql
+from core.data.sql_queries import users
+from core.utils.anything import truncate_text
 from core.handlers.rating_header import Match, positions, get_max_rating, get_user_defense_tactic, Team
+from core.utils import keyboards
+from core.handlers.online_5v5 import messages as pvp_messages
+from core.handlers.online_5v5.keyboards import pvp_menu_keyboard
 
 router = Router()
 
@@ -119,7 +120,7 @@ async def show_rating_table(callback : CallbackQuery, state : FSMContext, db: Pg
     len_pos = 2
     if(own_info is None):
         for i in range(len(users_info)):
-            username = users.get_username(users_info[i]['user_id'])
+            username = await db.users.get_username(users_info[i]['user_id'])
             if(username != 'Аноним'):
                 text += f'<code>{i + 1:{len_pos}d}) {users_info[i]['rating']:{len_rating}d}🏆</code> - <a href="https://t.me/{username[1:]}">{truncate_text(username, 12)}</a>\n'
             else:
@@ -131,7 +132,7 @@ async def show_rating_table(callback : CallbackQuery, state : FSMContext, db: Pg
         if own_info[2] > 10:
             len_pos = len(str(own_info[2]))
         for i in range(len(users_info)):
-            username = users.get_username(users_info[i]['user_id'])
+            username = await db.users.get_username(users_info[i]['user_id'])
             if(username != 'Аноним'):
                 if(i == own_info[2] - 1):
                     text += f'<b><i><code>{i + 1:{len_pos}d}) {users_info[i]['rating']:{len_rating}d}🏆</code> - <a href="https://t.me/{username[1:]}">{truncate_text(username, 12)}</a></i></b>\n'
@@ -140,7 +141,7 @@ async def show_rating_table(callback : CallbackQuery, state : FSMContext, db: Pg
             else:
                 text += f"<code>{i + 1:{len_pos}d}) {users_info[i]['rating']:{len_rating}d}🏆</code> - Аноним\n"
         if own_info[2] > 10:
-            username = users.get_username(own_info['user_id'])
+            username = await db.users.get_username(own_info[2]['user_id'])
             text += "      <b><i>—————————————\n"
             text += f'<code>{own_info[2]:{len_pos}d}) {own_info[0]:{len_rating}d}🏆</code> - <a href="https://t.me/{username[1:]}">{truncate_text(username, 12)}</a></i></b>\n'
 
@@ -353,3 +354,12 @@ async def watch_rules(callback: CallbackQuery, state : FSMContext):
     🛡 - Защита и в краске, и на периметре""")
     
     
+
+
+@router.callback_query(F.data == 'pvp_menu', StateFilter(Match.Main))
+async def show_pvp_menu(callback: CallbackQuery, state: FSMContext):
+    """Показать меню онлайн-режима с инструкциями"""
+    await callback.message.edit_text(
+        text=pvp_messages.get_pvp_menu_message(),
+        reply_markup=pvp_menu_keyboard()
+    )

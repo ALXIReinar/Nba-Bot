@@ -4,8 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import orjson
-from aiogram import Bot
-from aiogram.client.default import DefaultBotProperties
+from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from asyncpg import Connection
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,7 +20,9 @@ logging.critical(f'\033[35m{env_files}\033[0m | app_mode: \033[33m{os.getenv('AP
 
 WORKDIR = Path(__file__).resolve().parent.parent.parent
 
-"Создаём директорию для логов"
+"Создаём директории"
+CARDS_PHOTO_PATH = WORKDIR / 'cards_photo'
+CARDS_PHOTO_PATH.mkdir(parents=True, exist_ok=True)
 
 class Settings(BaseSettings):
     pg_port: int
@@ -38,6 +39,9 @@ class Settings(BaseSettings):
     bot_token: str
     admin_tg_id: int
 
+    cards_path: Path | str = CARDS_PHOTO_PATH
+    test_pvp: bool = bool(os.getenv('TEST_PVP', False))
+
     model_config = SettingsConfigDict(extra='allow')
 
 @lru_cache
@@ -46,8 +50,9 @@ def get_env_vars():
 env = get_env_vars()
 
 
-"Bot"
-bot = Bot(token=env.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+"Bot & Dispatcher"
+bot = Bot(token=env.bot_token, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+dp = Dispatcher()
 
 
 "PostgreSQL"
