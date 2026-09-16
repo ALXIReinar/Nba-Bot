@@ -8,7 +8,7 @@ from core.config_dir.config import bot, dp, redis_settings, pool_settings
 from core.handlers.middlewares.pg_middleware import PostgresMiddleware
 from core.handlers.middlewares.online_match_middleware import OnlineMatchMiddleware
 from core.handlers.start import start_handler, on_startup
-from core.handlers.online_5v5.router import router as online_router
+from core.handlers.game_5v5.online.router import router as online_router
 from core.utils.online_timeouts import scheduler
 
 

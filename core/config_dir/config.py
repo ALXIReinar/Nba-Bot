@@ -24,6 +24,10 @@ WORKDIR = Path(__file__).resolve().parent.parent.parent
 CARDS_PHOTO_PATH = WORKDIR / 'cards_photo'
 CARDS_PHOTO_PATH.mkdir(parents=True, exist_ok=True)
 
+LOG_DIR = WORKDIR / 'bot_logs'
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
 class Settings(BaseSettings):
     pg_port: int
     pg_host: str
@@ -40,7 +44,13 @@ class Settings(BaseSettings):
     admin_tg_id: int
 
     cards_path: Path | str = CARDS_PHOTO_PATH
+
+    # deprecated параметр. Не указывать
     test_pvp: bool = bool(os.getenv('TEST_PVP', False))
+
+    # Настройки дружеского ПВП режима
+    match_ttl: int = os.getenv("MATCH_TTL", 10_800) # 3 часа
+    match_request_ttl: int = os.getenv("MATCH_REQUEST_TTL", 300) # 5 минут
 
     model_config = SettingsConfigDict(extra='allow')
 

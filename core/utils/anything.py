@@ -2,17 +2,7 @@ from collections import namedtuple
 from dataclasses import dataclass
 
 
-admin_commands = {
-    '/flush_shop_cache', # Очистка кэша тарифных планов магазина
-    '/reset_req_limit', # сброс счётчика запросов на пользователя
-}
-
 class RedisKeys:
-    @staticmethod
-    def important_key(tg_id: str | int) -> str:
-        return f'important_key:tg_id={tg_id}:v1'
-    
-    # PvP матчи
     @staticmethod
     def pvp_match(match_id: str) -> str:
         """Ключ матча: pvp_match:match_id={uuid}"""
@@ -29,26 +19,13 @@ class RedisKeys:
         return f'match_request:{from_user_id}:{to_user_id}'
 
 
-@dataclass
-class SubServiceUris:
-    # users division
-    add_tg_user: str = '/api/v1/tg-bot/users/add'
-    get_user_profile: str = '/api/v1/tg-bot/users/get'
-
-    # user_subs division
-    get_user_subs_all: str = '/api/v1/tg-bot/users/subs/all'
-
-    # sub_plans division
-    get_sub_plans_all: str = '/api/v1/tg-bot/sub_plans/all'
-    get_payment_link: str = '/api/v1/robokassa/get_pay_link'
-
-
 def truncate_text(text, max_length=25):
     if len(text) > max_length:
         return text[:max_length-3] + "..."
     else:
         return text
 
+"Редкости карточек"
 category_template = namedtuple("category", ["id", "eng_name", "emoji", "single_msg", "craft_from", "need_to_craft",])
 
 bronze_category = category_template(0, 'bronze', '🥉', '🥉Бронза', 'bronze', 1)
@@ -63,4 +40,67 @@ categories = {
     'gold': gold_category,
     'legend': legend_category,
     'diamond': diamond_category,
+}
+
+"Роли карточек"
+positions = ["C", "PG", "PF", "SG", "SF"]
+
+
+"Онлайн пвп"
+@dataclass
+class GamePvpCalls:
+    pvp_menu: str = 'pvp_menu'
+    pvp_1: str = 'pvp_1'
+    pvp_2: str = 'pvp_2'
+    pvp_3: str = 'pvp_3'
+    pvp_run: str = 'pvp_run'
+
+    pvp_tactic_attack: str = 'pvp_tactic_attack'
+    pvp_tactic_defense: str = 'pvp_tactic_defense'
+    pvp_tactic_balance: str = 'pvp_tactic_balance'
+
+    tactic_map = {
+        pvp_tactic_defense: "defense",
+        pvp_tactic_attack: "attack",
+        pvp_tactic_balance: "balance"
+    }
+
+GAME_CALLBACKS = {
+    GamePvpCalls.pvp_1, GamePvpCalls.pvp_2, GamePvpCalls.pvp_3,
+    GamePvpCalls.pvp_run,
+
+    GamePvpCalls.pvp_tactic_defense,
+    GamePvpCalls.pvp_tactic_attack,
+    GamePvpCalls.pvp_tactic_balance,
+
+    GamePvpCalls.pvp_menu,
+    "NONE",
+    "none",
+}
+
+@dataclass
+class InvitePvpCalls:
+    pvp_accept_: str = 'pvp_accept_'
+    pvp_decline_: str = 'pvp_decline_'
+
+GAME_CALLBACK_PREFIXES = {
+    InvitePvpCalls.pvp_accept_,
+    InvitePvpCalls.pvp_decline_,
+}
+
+
+"Косметические мапы для пвп"
+platform_position_emoji = {
+    'interior': '🎨',
+    'perimetr': '🎯'
+}
+pick_tactic_message = {
+    'defense': "Оборонительную🛡",
+    'attack': "Атакующую⚔️",
+    'balance': "Сбалансированную⚖️"
+}
+tactic_message = {
+    'defense': "Оборонительная🛡",
+    'attack': "Атакующая⚔️",
+    'balance': "Сбалансированная⚖️"
 }

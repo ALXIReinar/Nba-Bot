@@ -1,8 +1,3 @@
-"""
-APScheduler для управления таймаутами PvP матчей.
-Проверяет, не истёк ли таймаут хода (2 минуты).
-"""
-import logging
 from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -10,9 +5,7 @@ from redis.asyncio import Redis
 
 from core.config_dir.config import bot
 from core.data.online_matches_manager import OnlineMatchesManager
-
-
-logger = logging.getLogger(__name__)
+from core.utils.logger_config import log_event
 
 # Singleton scheduler
 scheduler = AsyncIOScheduler()
@@ -34,22 +27,26 @@ def determine_winner_on_tactic_timeout(match_data: dict) -> tuple[int, int]:
     Returns:
         tuple[winner_id, loser_id]
     """
+
     player1_id = match_data["player1_id"]
     player2_id = match_data["player2_id"]
-    
+
     player1_tactic = match_data.get("player1_tactic")
     player2_tactic = match_data.get("player2_tactic")
-    
+
     # Если player1 выбрал, а player2 нет
     if player1_tactic and not player2_tactic:
+        log_event(f"\033[36m[Bg scheduler]\033[0m Игрок не выбрал тактику(p2 lose)! Техническое поражение | player1_id: {player1_id}, player2_id: {player2_id}")
         return player1_id, player2_id
-    
+
     # Если player2 выбрал, а player1 нет
     if player2_tactic and not player1_tactic:
+        log_event(f"\033[36m[Bg scheduler]\033[0m Игрок не выбрал тактику(p1 lose)! Техническое поражение | player1_id: {player1_id}, player2_id: {player2_id}")
         return player2_id, player1_id
-    
+
     # Если оба не выбрали (или оба выбрали - не должно случиться)
     # Проигрывает приглашённый (player2)
+    log_event(f"\033[36m[Bg scheduler]\033[0m Никто так и не выбрал тактику! Техническое поражение приглашённому! | player1_id: {player1_id}, player2_id: {player2_id}")
     return player1_id, player2_id
 
 
@@ -67,7 +64,7 @@ async def check_turn_timeout(match_id: str, turn_number: int, redis: Redis):
     match_data = await matches_manager.get_match(match_id)
     
     if not match_data:
-        logger.info(f"Match {match_id} not found (probably already finished)")
+        log_event(f'\033[36m[Bg scheduler]\033[0m Матч не найден. Не удалось прервать по таймауту | match_id: \033[33m{match_id}\033[0m', level='WARNING')
         return
     
     # Проверяем, совпадает ли turn_number
@@ -77,10 +74,9 @@ async def check_turn_timeout(match_id: str, turn_number: int, redis: Redis):
         # Специальная логика для turn_number = 0 (выбор тактики)
         if turn_number == 0:
             winner_id, loser_id = determine_winner_on_tactic_timeout(match_data)
-            logger.warning(
-                f"Match {match_id}: tactic selection timeout. "
-                f"Winner: {winner_id}, Loser: {loser_id}"
-            )
+
+            log_event(f'\033[36m[Bg scheduler]\033[0m Матч завершён по таймауту игрока | match_id: \033[33m{match_id}\033[0m; winner_id: {winner_id}; loser_id: {loser_id}', level='WARNING')
+
         else:
             # Обычная логика для игрового хода
             loser_id = match_data["current_attacker_id"]
@@ -89,17 +85,12 @@ async def check_turn_timeout(match_id: str, turn_number: int, redis: Redis):
                 if loser_id == match_data["player1_id"] 
                 else match_data["player1_id"]
             )
-            logger.warning(
-                f"Match {match_id}: timeout for turn {turn_number}. "
-                f"Winner: {winner_id}, Loser: {loser_id}"
-            )
+            log_event(f'\033[36m[Bg scheduler]\033[0m Матч завершён по таймауту игрока | match_id: \033[33m{match_id}\033[0m; winner_id: {winner_id}; loser_id: {loser_id}', level='WARNING')
+
         
         await finish_match_by_timeout(match_id, winner_id, loser_id, redis)
     else:
-        logger.info(
-            f"Match {match_id}: turn {turn_number} already completed "
-            f"(current: {match_data['turn_number']})"
-        )
+        log_event(f'\033[36m[Bg scheduler]\033[0m Матч завершился. Скип | match_id: \033[33m{match_id}\033[0m')
 
 
 def schedule_turn_timeout(match_id: str, turn_number: int, redis: Redis):
@@ -128,8 +119,7 @@ def schedule_turn_timeout(match_id: str, turn_number: int, redis: Redis):
         id=job_id,
         replace_existing=True
     )
-    
-    logger.info(f"Scheduled timeout check for match {match_id}, turn {turn_number}")
+    log_event(f'\033[36m[Bg scheduler]\033[0m Джоба для таймаутов матчей | turn_num: \033[35m{turn_number}\033[0m; match_id: \033[33m{match_id}\033[0m')
 
 
 async def finish_match_by_timeout(
@@ -151,6 +141,7 @@ async def finish_match_by_timeout(
     match_data = await matches_manager.get_match(match_id)
     
     if not match_data:
+        log_event(f'\033[36m[Bg scheduler]\033[0m Матч не найден. Не удалось закончить по таймауту | match_id: \033[33m{match_id}\033[0m', level='WARNING')
         return
     
     # Обновляем данные матча
@@ -161,11 +152,6 @@ async def finish_match_by_timeout(
     })
     
     # Отправляем уведомления обоим игрокам
-    winner_username = (
-        match_data["player1_username"] 
-        if winner_id == match_data["player1_id"] 
-        else match_data["player2_username"]
-    )
     loser_username = (
         match_data["player1_username"] 
         if loser_id == match_data["player1_id"] 
@@ -218,12 +204,12 @@ async def finish_match_by_timeout(
         await bot.send_message(winner_id, winner_message)
         await bot.send_message(loser_id, loser_message)
     except Exception as e:
-        logger.error(f"Error sending timeout finish messages: {e}")
-    
+        log_event(f'\033[36m[Bg scheduler]\033[0m Не удалось отправить сообщение о техническом поражении игрокам! | match_id: \033[35m{match_id}\033[0m; winner_tg_id: \033[33m{winner_id}\033[0m; loser_tg_id: \033[35m{loser_id}\033[0m; err: \033[31m{repr(e)}\033[0m', level='WARNING')
+
+
     # Удаляем матч
     await matches_manager.delete_match(match_id)
-    
-    logger.info(f"Match {match_id} finished by timeout. Winner: {winner_id}")
+    log_event(f'\033[36m[Bg scheduler]\033[0m Матч завершился по таймауту | match_id: \033[35m{match_id}\033[0m; winner_tg_id: \033[33m{winner_id}\033[0m; loser_tg_id: \033[35m{loser_id}\033[0m')
 
 
 async def finish_match_by_exit(match_id: str, exit_user_id: int, redis: Redis):
@@ -239,6 +225,7 @@ async def finish_match_by_exit(match_id: str, exit_user_id: int, redis: Redis):
     match_data = await matches_manager.get_match(match_id)
     
     if not match_data:
+        log_event(f'\033[36m[Bg scheduler]\033[0m Матч не найден. Не удалось закончить по причине выхода из матча одного из игроков | match_id: \033[33m{match_id}\033[0m', level='WARNING')
         return
     
     # Определяем победителя и проигравшего
@@ -298,15 +285,15 @@ async def finish_match_by_exit(match_id: str, exit_user_id: int, redis: Redis):
         await bot.send_message(winner_id, winner_message)
         await bot.send_message(loser_id, loser_message)
     except Exception as e:
-        logger.error(f"Error sending exit finish messages: {e}")
-    
+        log_event(f'\033[36m[Bg scheduler]\033[0m Не удалось отправить сообщение о техническом поражении игрокам! | match_id: \033[35m{match_id}\033[0m; winner_tg_id: \033[33m{winner_id}\033[0m; loser_tg_id: \033[35m{loser_id}\033[0m; err: \033[31m{repr(e)}\033[0m', level='WARNING')
+
+    log_event(f'\033[36m[Bg scheduler]\033[0m Отменяем фоновые задачи матча | match_id: \033[35m{match_id}\033[0m')
     # Отменяем все запланированные таймауты для этого матча
     cancel_match_timeouts(match_id)
     
     # Удаляем матч
     await matches_manager.delete_match(match_id)
-    
-    logger.info(f"Match {match_id} finished by exit. Exited user: {exit_user_id}")
+    log_event(f'\033[36m[Bg scheduler]\033[0m Матч завершился, т.к. кто-то вышел из него | match_id: \033[35m{match_id}\033[0m; winner_tg_id: \033[33m{winner_id}\033[0m; loser_tg_id: \033[35m{loser_id}\033[0m')
 
 
 async def finish_match_normal(
@@ -326,6 +313,7 @@ async def finish_match_normal(
     match_data = await matches_manager.get_match(match_id)
     
     if not match_data:
+        log_event(f'\033[36m[Bg scheduler]\033[0m Матч не найден. Не удалось завершить gracefully | match_id: \033[33m{match_id}\033[0m', level='WARNING')
         return
     
     # Обновляем данные матча
@@ -363,15 +351,15 @@ async def finish_match_normal(
         await bot.send_message(match_data["player1_id"], message)
         await bot.send_message(match_data["player2_id"], message)
     except Exception as e:
-        logger.error(f"Error sending normal finish messages: {e}")
-    
+        log_event(f'\033[36m[Bg scheduler]\033[0m Не удалось отправить сообщение о итогах матча! | match_id: \033[35m{match_id}\033[0m; winner_tg_id: \033[33m{winner_id}\033[0m; err: \033[31m{repr(e)}\033[0m', level='WARNING')
+
     # Отменяем все запланированные таймауты
+    log_event(f'\033[36m[Bg scheduler]\033[0m Отменяем фоновые задачи матча | match_id: \033[35m{match_id}\033[0m')
     cancel_match_timeouts(match_id)
     
     # Удаляем матч
     await matches_manager.delete_match(match_id)
-    
-    logger.info(f"Match {match_id} finished normally. Winner: {winner_id}")
+    log_event(f'\033[36m[Bg scheduler]\033[0m Матч завершился по таймауту | match_id: \033[35m{match_id}\033[0m; winner_tg_id: \033[33m{winner_id}\033[0m')
 
 
 def cancel_match_timeouts(match_id: str):
@@ -386,6 +374,6 @@ def cancel_match_timeouts(match_id: str):
         if job.id.startswith(f"pvp_timeout_{match_id}_"):
             try:
                 scheduler.remove_job(job.id)
-                logger.info(f"Cancelled timeout job: {job.id}")
+                log_event(f"\033[36m[Bg scheduler]\033[0m Отменили джобу | match_id: \033[33m{match_id}\033[0m; job_id: {job.id}")
             except Exception as e:
-                logger.warning(f"Failed to cancel job {job.id}: {e}")
+                log_event(f"\033[36m[Bg scheduler]\033[0m Не смогли отменить джобу | match_id: \033[33m{match_id}\033[0m; job_id: {job.id}; err: {repr(e)}\033[0m", level='WARNING')

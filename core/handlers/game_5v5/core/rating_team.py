@@ -12,7 +12,6 @@ from aiogram.fsm.context import FSMContext
 
 from core.config_dir.img_cache import image_cache
 from core.data.postgres import PgSql
-from core.data.sql_queries import users
 from core.utils.anything import truncate_text
 from core.handlers.rating_header import Match, positions, get_max_rating, get_user_defense_tactic, Team
 from core.utils import keyboards

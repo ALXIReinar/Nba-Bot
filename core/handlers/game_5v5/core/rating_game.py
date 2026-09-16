@@ -15,46 +15,16 @@ from core.config_dir.config import bot, env
 from core.config_dir.img_cache import image_cache
 from core.data.postgres import PgSql
 from core.data.sql_queries import users
-from core.handlers.rating_header import PlayerInfo, Team, positions, tactic_message, pick_tactic_message, PlayersPair, platform_position_emoji, Match
+from core.handlers.game_5v5.core.game_stat_configs import pass_debuff_values, PassSecondState, dribbling_buff_values, PassFirstState, \
+    PressureResult, AttackFirstState, shoot_buff_values
+from core.handlers.game_5v5.core.rating_header import PlayerInfo, Team, PlayersPair, Match
+from core.utils.anything import positions, platform_position_emoji, pick_tactic_message, tactic_message
 from core.utils import keyboards
 
 router = Router()
 
 import copy
 
-import enum
-
-class PassFirstState(enum.Enum):
-    lost = 0
-    bad = 1
-    good = 2
-
-class PassSecondState(enum.Enum):
-    normal = 0
-    good = 1
-    perfect = 2
-
-class ShootType(enum.Enum):
-    through_block = 0
-    hard_throw = 1
-    free_throw = 2
-
-class PressureResult(enum.Enum):
-    overcome_pressure = 0
-    lost_to_pressure = 1
-
-class AttackFirstState(enum.Enum):
-    lost = 0
-    trough_block_success = 1
-    trough_block_fail = 2
-    hard_throw_success = 3
-    hard_throw_fail = 4
-    free_throw_success = 5
-    free_throw_fail = 6
-
-pass_debuff = {PassSecondState.normal: 0.1, PassSecondState.good: 0.25, PassSecondState.perfect: 1}
-dribbling_buff = {PassFirstState.bad: 0.85}
-shoot_buff = {ShootType.through_block: 0.9, ShootType.hard_throw: 0.9, ShootType.free_throw: 1.2}
 
 
 from aiogram.exceptions import TelegramNetworkError
@@ -256,13 +226,13 @@ async def set_positions(state : FSMContext, switch : bool, save_pg : bool):
 
         debuff = 0
         if(pass_state == 'good'):
-            debuff = pass_debuff[PassSecondState.good]
+            debuff = pass_debuff_values[PassSecondState.good]
         elif(pass_state == 'normal'):
-            debuff = pass_debuff[PassSecondState.normal]
+            debuff = pass_debuff_values[PassSecondState.normal]
         elif(pass_state == 'perfect'):
-            debuff = pass_debuff[PassSecondState.perfect]
+            debuff = pass_debuff_values[PassSecondState.perfect]
         elif(pass_state == 'bad'):
-            pg_pair.attacker.current_stats.dribbling = max(0, int(pg_pair.attacker.current_stats.dribbling  * dribbling_buff[PassFirstState.bad]))
+            pg_pair.attacker.current_stats.dribbling = max(0, int(pg_pair.attacker.current_stats.dribbling * dribbling_buff_values[PassFirstState.bad]))
         
         if debuff != 0:
             pg_pair.defender.apply_def_debuff(debuff)
@@ -460,7 +430,7 @@ def try_shoot(dribbling, defence, hands, steal, attack, block) -> AttackFirstSta
         return AttackFirstState.lost
     
     rand = random.random()
-    buff = shoot_buff[shootType]
+    buff = shoot_buff_values[shootType]
     attack = min(100, int(buff * attack)) / 100
     if shootType == ShootType.through_block:
         attack -= block / 100 / 2
@@ -545,8 +515,8 @@ def calculate_chance_to_pass_pair(pg_pair: PlayersPair) -> PassFirstState:
 def calculate_goodness_pass(pg_pair: PlayersPair, pass_pair: PlayersPair) -> float:
     pass_chanse = calculate_chance_to_pass_pair(pg_pair)
     pair = copy.deepcopy(pass_pair)
-    pair.defender.current_stats.perimetr_def *= pass_debuff[PassSecondState.normal]
-    pair.defender.current_stats.interior_def *= pass_debuff[PassSecondState.normal]
+    pair.defender.current_stats.perimetr_def *= pass_debuff_values[PassSecondState.normal]
+    pair.defender.current_stats.interior_def *= pass_debuff_values[PassSecondState.normal]
     
     chance_to_dribble = calculate_chance_to_successful_attack(pair)
 
@@ -816,7 +786,7 @@ async def end_attack(players_pair : PlayersPair, is_bot : bool = False) -> (str 
     
     await asyncio.sleep(2)
     if attackState in [AttackFirstState.lost, AttackFirstState.trough_block_fail, AttackFirstState.trough_block_success]:
-        buff = shoot_buff[ShootType.through_block]
+        buff = shoot_buff_values[ShootType.through_block]
         chance = min(100, int(buff * attack - int(block / 2)))
         if attackState == AttackFirstState.lost:
             action_message = "\nНеудача, противник выбил мяч!"
@@ -829,7 +799,7 @@ async def end_attack(players_pair : PlayersPair, is_bot : bool = False) -> (str 
             success_message = "\n\nБЛОК!"
             score = 0
     elif attackState in [AttackFirstState.hard_throw_fail, AttackFirstState.hard_throw_success]:
-        buff = shoot_buff[ShootType.hard_throw]
+        buff = shoot_buff_values[ShootType.hard_throw]
         attack = min(100, int(buff * attack))
         action_message = f"\nСложный бросок!\n" + throw_message % attack
         if attackState == AttackFirstState.hard_throw_success:
@@ -838,7 +808,7 @@ async def end_attack(players_pair : PlayersPair, is_bot : bool = False) -> (str 
             success_message = "\n\nПромах!"
             score = 0
     elif attackState in [AttackFirstState.free_throw_success, AttackFirstState.free_throw_fail]:
-        buff = shoot_buff[ShootType.free_throw]
+        buff = shoot_buff_values[ShootType.free_throw]
         attack = min(100, int(buff * attack))
         action_message = f"\nОткрытый бросок!\n" + throw_message % attack
         if attackState == AttackFirstState.free_throw_success:
