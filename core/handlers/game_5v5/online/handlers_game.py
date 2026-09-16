@@ -1,37 +1,37 @@
 import asyncio
-import logging
 
 from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
 from aiogram.types import CallbackQuery
 from redis.asyncio import Redis
 
-from core.config_dir.config import bot, env
+from core.config_dir.config import bot, dp
 from core.config_dir.img_cache import image_cache
 from core.data.online_matches_manager import OnlineMatchesManager
 from core.data.sql_queries import users
-from core.handlers.online_5v5 import messages as pvp_messages
-from core.handlers.online_5v5.game_logic import (
-    deserialize_team,
+from core.handlers.game_5v5.online import messages as pvp_messages
+from core.handlers.game_5v5.online.game_logic import (
     apply_tactic_to_team,
     set_positions_for_pvp,
     execute_attack_action,
     execute_pass_action
 )
-from core.handlers.online_5v5.keyboards import (
+from core.handlers.game_5v5.online.serializers import deserialize_team, serialize_player_pair, deserialize_player_pair
+from core.handlers.game_5v5.online.keyboards import (
     pvp_game_keyboard,
     pvp_only_attack_keyboard
 )
-from core.handlers.online_5v5.states import OnlineMatch
-from core.handlers.rating_header import platform_position_emoji
+from core.handlers.game_5v5.online.states import OnlineMatch
+from core.utils.anything import GamePvpCalls, platform_position_emoji
+from core.utils.logger_config import log_event
 from core.utils.online_timeouts import (
     schedule_turn_timeout,
     finish_match_normal
 )
 
 
-logger = logging.getLogger(__name__)
 router = Router(name="online_5v5_game")
 
 
@@ -48,7 +48,7 @@ async def start_pvp_attack(match_id: str, redis: Redis, bot_storage=None):
     match_data = await matches_manager.get_match(match_id)
     
     if not match_data:
-        logger.error(f"Match {match_id} not found")
+        log_event(f"Матч не найден. Невозможно начать атаку | match_id: \033[31m{match_id}\033[0m", level='WARNING')
         return
     
     cycle = match_data["cycle"]
@@ -58,12 +58,16 @@ async def start_pvp_attack(match_id: str, redis: Redis, bot_storage=None):
         if attacker_id == match_data["player1_id"]
         else match_data["player1_id"]
     )
-    
-    # Проверяем, не закончилась ли игра (5 циклов)
+
+
+    "Проверяем, не закончилась ли игра (5 циклов)"
+    # Можно сделать cycle > match_data["max_cycles"]. А задавать при /invite test_user 10
+    # По дефолту - 5 (match_data.get("max_cycles", 5))
     if cycle > 5:
+        log_event(f'Матч завершён. Подводим итоги | match_id: \033[33m{match_id}; attacker_tg_id: \033[36m{attacker_id}\033[0m; defender_tg_id: \033[0m{defender_id}\033[0m; cycle: \033[31m{cycle}\033[0m')
         await finish_match(match_id, redis)
         return
-    
+
     # Получаем команды
     attacker_key = "player1" if attacker_id == match_data["player1_id"] else "player2"
     defender_key = "player2" if attacker_key == "player1" else "player1"
@@ -108,14 +112,10 @@ async def start_pvp_attack(match_id: str, redis: Redis, bot_storage=None):
     
     # Устанавливаем FSM состояния для обоих игроков
     if bot_storage:
-        from aiogram.fsm.storage.base import StorageKey
         
-        # Получаем реальные user_id для FSM StorageKey
-        attacker_real_user_id = match_data.get(f"{attacker_key}_real_user_id", attacker_id)
-        defender_real_user_id = match_data.get(f"{defender_key}_real_user_id", defender_id)
-        
-        storage_key_att = StorageKey(bot_id=bot.id, chat_id=attacker_id, user_id=attacker_real_user_id)
-        storage_key_def = StorageKey(bot_id=bot.id, chat_id=defender_id, user_id=defender_real_user_id)
+        # Используем player_id для обоих параметров
+        storage_key_att = StorageKey(bot_id=bot.id, chat_id=attacker_id, user_id=attacker_id)
+        storage_key_def = StorageKey(bot_id=bot.id, chat_id=defender_id, user_id=defender_id)
         
         # Атакующий - PlayingTurn, Защищающийся - WaitingOpponent
         await bot_storage.set_state(key=storage_key_att, state=OnlineMatch.PlayingTurn)
@@ -126,7 +126,6 @@ async def start_pvp_attack(match_id: str, redis: Redis, bot_storage=None):
         attacker_id,
         pvp_messages.get_you_attack_first_message(cycle, attacker_score, defender_score)
     )
-    
     await send_action_message(attacker_id, match_id, redis)
     
     # Защищающемуся
@@ -134,21 +133,15 @@ async def start_pvp_attack(match_id: str, redis: Redis, bot_storage=None):
         defender_id,
         pvp_messages.get_opponent_attacks_message(cycle, defender_score, attacker_score)
     )
-    
+
     waiting_msg = await bot.send_message(
         defender_id,
         pvp_messages.get_waiting_opponent_move_message()
     )
     
     # Сохраняем ID сообщения ожидания для редактирования
-    await matches_manager.update_waiting_message(
-        match_id,
-        defender_key,
-        waiting_msg.message_id
-    )
-    
-    logger.info(f"Match {match_id}: Started attack cycle {cycle}, attacker={attacker_id}")
-    
+    await matches_manager.update_waiting_message(match_id, defender_key, waiting_msg.message_id)
+    log_event(f"Атака инициализирована! Атакующий - выбирает атаку, Защита - ждёт и смотрит | match_id: \033[33m{match_id}; attacker_tg_id: \033[36m{attacker_id}\033[0m; defender_tg_id: \033[0m{defender_id}\033[0m; cycle: \033[31m{cycle}\033[0m")
 
 
 async def send_action_message(user_id: int, match_id: str, redis: Redis):
@@ -164,6 +157,7 @@ async def send_action_message(user_id: int, match_id: str, redis: Redis):
     match_data = await matches_manager.get_match(match_id)
     
     if not match_data:
+        log_event(f'Матч не найден. Не удалось отправить сообщение для хода | match_id: \033[33m{match_id}\033[0m', level='WARNING')
         return
     
     game_state = match_data["game_state"]
@@ -198,6 +192,7 @@ async def send_action_message(user_id: int, match_id: str, redis: Redis):
         message,
         reply_markup=keyboard
     )
+    log_event(f'Отправили выбор действия атакующему | card_id: \033[33m{player.card_id}\033[0m; tg_id: \033[32m{user_id}\033[0m')
 
 
 def get_dribble_message(player, opp, pos: str, opp_def) -> str:
@@ -236,45 +231,44 @@ def get_pass_message(pg_pair, pass_pair) -> str:
 
 
 @router.callback_query(
-    F.data.in_({'pvp_1', 'pvp_2', 'pvp_3'}),
+    F.data.in_({GamePvpCalls.pvp_1, GamePvpCalls.pvp_2, GamePvpCalls.pvp_3}),
     StateFilter(OnlineMatch.PlayingTurn)
 )
 async def pvp_choose_action(callback: CallbackQuery, redis: Redis):
     """
     Переключение между кнопками выбора действия [1|2|3].
     """
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     matches_manager = OnlineMatchesManager(redis)
-    
+
     # Проверяем блокировку действий
     if users.is_user_actions_locked(user_id):
+        log_event(f'Пользователь шалит. Спамит кнопки | tg_id: \033[31m{user_id}\033[0m', level='WARNING')
         await callback.answer("Подожди немного")
         return
-    
+
+    # Достаём данные о матче
     match_id = await matches_manager.get_user_match_id(user_id)
-    
-    if not match_id:
-        await callback.answer("❌ Матч не найден", show_alert=True)
-        return
-    
     match_data = await matches_manager.get_match(match_id)
-    
+
     if not match_data:
+        log_event(f'Матч не найден. Не удалось сменить действие для атаки | match_id: \033[33m{user_id}\033[0m', level='WARNING')
         await callback.answer("❌ Матч не найден", show_alert=True)
         return
-    
+
     # Определяем выбранное действие
     action = int(callback.data.split('_')[1])
-    
+
     # Обновляем game_state
     game_state = match_data["game_state"]
     game_state["current_action"] = action
-    
+
+    log_event(f'Пользователь выбирает другое действие для атаки. Применяем статы | user_id: \033[36m{user_id}\033[0m; match_id: \033[33m{match_id}\033[0m')
     await matches_manager.update_match(match_id, {"game_state": game_state})
-    
+
     # Обновляем сообщение с новой клавиатурой
     pg_pair = deserialize_player_pair(game_state["pg_pair"])
-    
+
     if action == 1:
         # Атака
         pos = pg_pair.position
@@ -293,57 +287,57 @@ async def pvp_choose_action(callback: CallbackQuery, redis: Redis):
         pass_pair = deserialize_player_pair(game_state[pass_pair_key])
         message = get_pass_message(pg_pair, pass_pair)
         keyboard = pvp_game_keyboard(action)
-    
+
+
     await image_cache.edit_card_media(
-        callback.message.chat.id,
-        callback.message.message_id,
-        pg_pair.attacker.card_id,
-        message,
-        keyboard
+        callback.message.chat.id, callback.message.message_id, pg_pair.attacker.card_id, message, keyboard
     )
+    log_event(f'Пользователь выбрал другое действие для атаки. Отобразили на клавиатуре | tg_id: \033[31m{user_id}\033[0m; match_id: \033[33m{match_id}\033[0m; cur_action: \033[34m{action}\033[0m')
 
 
-@router.callback_query(F.data == 'pvp_run', StateFilter(OnlineMatch.PlayingTurn))
+@router.callback_query(F.data == GamePvpCalls.pvp_run, StateFilter(OnlineMatch.PlayingTurn))
 async def pvp_execute_action(callback: CallbackQuery, state: FSMContext, redis: Redis):
     """
     Выполнить выбранное действие (атака или пас).
     """
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
 
     # Проверяем блокировку
     if users.is_user_actions_locked(user_id):
+        log_event(f'Пользователь шалит. Спамит кнопки | tg_id: \033[31m{user_id}\033[0m', level='WARNING')
         await callback.answer("Подожди немного")
         return
     
     users.lock_user_actions(user_id)
-    
+
     try:
+        "Находим данные матча"
         matches_manager = OnlineMatchesManager(redis)
         match_id = await matches_manager.get_user_match_id(user_id)
-        
-        if not match_id:
-            await callback.answer("❌ Матч не найден", show_alert=True)
-            return
-        
         match_data = await matches_manager.get_match(match_id)
-        
+
         if not match_data:
+            log_event(f'Матч не найден. Не удалось сменить действие для атаки(клавиатура) | user_id: \033[33m{user_id}\033[0m', level='WARNING')
             await callback.answer("❌ Матч не найден", show_alert=True)
             return
-        
+
+        "Обрабатываем статы"
+        log_event(f'Пользователь подтвердил действие для атаки. Исполняем | user_id: \033[36m{user_id}\033[0m; match_id: \033[33m{match_id}\033[0m')
+
         # Инкрементим turn_number и планируем новый таймаут
         new_turn_number = await matches_manager.increment_turn_number(match_id)
         schedule_turn_timeout(match_id, new_turn_number, redis)
-        
+
         game_state = match_data["game_state"]
         current_action = game_state["current_action"]
-        
+
         # Выполняем действие
         if current_action == 1:
             # Атака
+            log_event(f'Атакующий идёт в нападение | user_id: \033[34m{user_id}\033[0m; match_id: \033[32m{match_id}\033[0m')
             await execute_pvp_attack(match_id, callback, redis)
         else:
-            # Пас
+            log_event(f'Атакующий сделал Пас | user_id: \033[36m{user_id}\033[0m; match_id: \033[33m{match_id}\033[0m')
             await execute_pvp_pass(match_id, current_action, callback, redis)
     
     finally:
@@ -363,7 +357,7 @@ async def execute_pvp_attack(match_id: str, callback: CallbackQuery, redis: Redi
     first_msg, action_msg, success_msg, score = execute_attack_action(pg_pair)
     
     # Отправляем результат атакующему
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
 
     await bot.send_message(user_id, first_msg + "...")
     await asyncio.sleep(1)
@@ -378,10 +372,8 @@ async def execute_pvp_attack(match_id: str, callback: CallbackQuery, redis: Redi
     defender_id = match_data[f"{defender_key}_id"]
     
     # Отправляем результат с 🆚 защищающемуся
-    await bot.send_message(
-        defender_id,
-        f"🆚 {first_msg}{action_msg}{success_msg}"
-    )
+    log_event(f'Определяем исход атаки | attacker_tg_id: \033[36m{attacker_id}\033[0m; defender_tg_id: \033[34m{defender_id}\033[0m; match_id: \033[33m{match_id}\033[0m')
+    await bot.send_message(defender_id, f"🆚 {first_msg}{action_msg}{success_msg}")
     
     if score >= 0:
         # Атака успешна - обновляем счёт
@@ -394,17 +386,14 @@ async def execute_pvp_attack(match_id: str, callback: CallbackQuery, redis: Redi
         await asyncio.sleep(1)
         
         # Переходим к следующему циклу
+        log_event(f'Атака успешна! Следующий цикл | attacker_tg_id: \033[33m{attacker_id}\033[0m; defender_tg_id: \033[31m{defender_id}\033[0m; match_id: \033[35m{match_id}\033[0m')
         await switch_attacker(match_id, redis)
     else:
         # Мяч потерян - снижаем защиту на 10%
-        await bot.send_message(
-            user_id,
-            "Защита снижена на 10%"
-        )
-        await bot.send_message(
-            defender_id,
-            "🆚 Защита снижена на 10%"
-        )
+        log_event(f'Мяч потерян! Следующий цикл | attacker_tg_id: \033[31m{attacker_id}\033[0m; defender_tg_id: \033[32m{defender_id}\033[0m; match_id: \033[35m{match_id}\033[0m')
+
+        await bot.send_message(user_id, "Защита снижена на 10%")
+        await bot.send_message(defender_id, "🆚 Защита снижена на 10%")
         
         await matches_manager.update_match(match_id, {"def_debuff": 0.1})
         await switch_attacker(match_id, redis)
@@ -425,12 +414,13 @@ async def execute_pvp_pass(
     
     pass_pair_key = "first_pair" if action == 2 else "second_pair"
     pass_pair = deserialize_player_pair(game_state[pass_pair_key])
-    
+
     # Выполняем пас
+    log_event(f'Определяем исход паса | match_id: \033[33m{match_id}\033[0m')
     first_msg, success_msg, success, pass_state = execute_pass_action(pg_pair, pass_pair)
     
     # Отправляем результат атакующему
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
 
     await bot.send_message(user_id, first_msg + "...")
     await asyncio.sleep(2)
@@ -443,15 +433,12 @@ async def execute_pvp_pass(
     defender_id = match_data[f"{defender_key}_id"]
     
     # Отправляем результат с 🆚 защищающемуся
-    await bot.send_message(
-        defender_id,
-        f"🆚 {first_msg}{success_msg}"
-    )
-    
+    await bot.send_message(defender_id, f"🆚 {first_msg}{success_msg}")
     await asyncio.sleep(1)
     
     if success:
         # Пас удался - обновляем позиции
+        log_event(f'Пас успешен, применяем статы | match_id: \033[33m{match_id}\033[0m')
         pass_count = match_data["pass_count"] + 1
         
         # Получаем команды
@@ -491,17 +478,13 @@ async def execute_pvp_pass(
         })
         
         # Продолжаем атаку
+        log_event(f'Статы применены, продолжаем цикл | match_id: \033[32m{match_id}\033[0m')
         await send_action_message(attacker_id, match_id, redis)
     else:
         # Пас не удался - переход хода
-        await bot.send_message(
-            user_id,
-            "Защита снижена на 10%"
-        )
-        await bot.send_message(
-            defender_id,
-            "🆚 Защита снижена на 10%"
-        )
+        log_event(f'Пас провалился. Запускаем новый цикл. Обработка итогов текущего цикла... | match_id: \033[32m{match_id}\033[0m')
+        await bot.send_message(user_id, "Защита снижена на 10%")
+        await bot.send_message(defender_id, "🆚 Защита снижена на 10%")
         
         await matches_manager.update_match(match_id, {"def_debuff": 0.1})
         await switch_attacker(match_id, redis)
@@ -515,6 +498,7 @@ async def switch_attacker(match_id: str, redis: Redis):
     match_data = await matches_manager.get_match(match_id)
     
     if not match_data:
+        log_event(f'Матч не найден. Не удалось сменить роли(для нового цикла) | match_id: \033[33m{match_id}\033[0m', level='WARNING')
         return
     
     # Переключаем атакующего
@@ -540,9 +524,8 @@ async def switch_attacker(match_id: str, redis: Redis):
         "cycle": cycle,
         "pass_count": 0
     })
-    
-    # Запускаем следующую атаку
-    from core.config_dir.config import dp
+
+    log_event(f'Цикл обработан. Запускаем атаку! | match_id: \033[32m{match_id}\033[0m; new_attacker_tg_id: \033[32m{new_attacker}\033[0m')
     await start_pvp_attack(match_id, redis, dp.storage)
 
 
@@ -554,6 +537,7 @@ async def finish_match(match_id: str, redis: Redis):
     match_data = await matches_manager.get_match(match_id)
     
     if not match_data:
+        log_event(f'Матч не найден. Не удалось подвести итоги | match_id: \033[33m{match_id}\033[0m', level='WARNING')
         return
     
     # Определяем победителя
@@ -566,112 +550,7 @@ async def finish_match(match_id: str, redis: Redis):
         winner_id = match_data["player2_id"]
     else:
         winner_id = None  # Ничья
-    
+
+    log_event(f"Матч завершён (None == ничья)! Запускаем пост-процедуры | match_id: \033[32m{match_id}\033[0m; winner_tg_id: \033[32m{winner_id}\033[0m")
     await finish_match_normal(match_id, winner_id, redis)
 
-
-# Вспомогательные функции сериализации PlayersPair
-
-def serialize_player_pair(pair) -> dict:
-    """Сериализация PlayersPair для Redis"""
-    from core.handlers.rating_header import PlayerInfo
-    
-    def serialize_player(p: PlayerInfo) -> dict:
-        return {
-            "card_id": p.card_id,
-            "name": p.name,
-            "category": p.category,
-            "position": p.position,
-            "positions": p.positions,
-            "team_name": p.team_name,
-            "on_right_position": p.on_right_position,
-            "base_stats": {
-                "three_point": p.base_stats.three_point,
-                "mid_point": p.base_stats.mid_point,
-                "layup": p.base_stats.layup,
-                "dunk": p.base_stats.dunk,
-                "perimetr_def": p.base_stats.perimetr_def,
-                "interior_def": p.base_stats.interior_def,
-                "passplay": p.base_stats.passplay,
-                "dribbling": p.base_stats.dribbling,
-                "block": p.base_stats.block,
-                "hands": p.base_stats.hands,
-                "pass_perception": p.base_stats.pass_perception,
-                "steal": p.base_stats.steal
-            },
-            "current_stats": {
-                "three_point": p.current_stats.three_point,
-                "mid_point": p.current_stats.mid_point,
-                "layup": p.current_stats.layup,
-                "dunk": p.current_stats.dunk,
-                "perimetr_def": p.current_stats.perimetr_def,
-                "interior_def": p.current_stats.interior_def,
-                "passplay": p.current_stats.passplay,
-                "dribbling": p.current_stats.dribbling,
-                "block": p.current_stats.block,
-                "hands": p.current_stats.hands,
-                "pass_perception": p.current_stats.pass_perception,
-                "steal": p.current_stats.steal
-            }
-        }
-    
-    return {
-        "attacker": serialize_player(pair.attacker),
-        "defender": serialize_player(pair.defender),
-        "position": pair.position
-    }
-
-
-def deserialize_player_pair(pair_data: dict):
-    """Десериализация PlayersPair из Redis"""
-    from core.handlers.rating_header import PlayerInfo, PlayerStats, PlayersPair
-    
-    def deserialize_player(p_data: dict) -> PlayerInfo:
-        base_stats = PlayerStats(
-            three_point=p_data["base_stats"]["three_point"],
-            mid_point=p_data["base_stats"]["mid_point"],
-            layup=p_data["base_stats"]["layup"],
-            dunk=p_data["base_stats"]["dunk"],
-            perimetr_def=p_data["base_stats"]["perimetr_def"],
-            interior_def=p_data["base_stats"]["interior_def"],
-            passplay=p_data["base_stats"]["passplay"],
-            dribbling=p_data["base_stats"]["dribbling"],
-            block=p_data["base_stats"]["block"],
-            steal=p_data["base_stats"]["steal"],
-            hands=p_data["base_stats"]["hands"],
-            pass_perception=p_data["base_stats"]["pass_perception"]
-        )
-        
-        player = PlayerInfo(
-            card_id=p_data["card_id"],
-            position=p_data["position"],
-            category=p_data["category"],
-            name=p_data["name"],
-            stats=base_stats,
-            team_name=p_data["team_name"],
-            positions=p_data["positions"]
-        )
-        player.on_right_position = p_data["on_right_position"]
-        
-        # Восстанавливаем current_stats
-        player.current_stats = PlayerStats(
-            three_point=p_data["current_stats"]["three_point"],
-            mid_point=p_data["current_stats"]["mid_point"],
-            layup=p_data["current_stats"]["layup"],
-            dunk=p_data["current_stats"]["dunk"],
-            perimetr_def=p_data["current_stats"]["perimetr_def"],
-            interior_def=p_data["current_stats"]["interior_def"],
-            passplay=p_data["current_stats"]["passplay"],
-            dribbling=p_data["current_stats"]["dribbling"],
-            block=p_data["current_stats"]["block"],
-            steal=p_data["current_stats"]["steal"],
-            hands=p_data["current_stats"]["hands"],
-            pass_perception=p_data["current_stats"]["pass_perception"]
-        )
-        
-        return player
-    
-    attacker = deserialize_player(pair_data["attacker"])
-    defender = deserialize_player(pair_data["defender"])
-    
-    return PlayersPair(attacker, defender, pair_data["position"])

@@ -1,11 +1,9 @@
 from aiogram.types import Message
-from numpy.ma.extras import mr_
 from redis.asyncio import Redis
 
 from core.config_dir.config import bot, env
 from core.data.postgres import PgSql
-from core.handlers.rating_header import positions
-from core.utils.anything import RedisKeys
+from core.utils.anything import positions
 
 
 async def on_startup():

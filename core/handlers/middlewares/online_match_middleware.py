@@ -1,16 +1,14 @@
-import logging
 from typing import Any, Awaitable, Callable, Dict
 
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 from redis.asyncio import Redis
 
-from core.config_dir.config import env
 from core.data.online_matches_manager import OnlineMatchesManager
+from core.utils.anything import GAME_CALLBACKS, GAME_CALLBACK_PREFIXES
+from core.utils.logger_config import log_event
 from core.utils.online_timeouts import finish_match_by_exit
 
-
-logger = logging.getLogger(__name__)
 
 
 class OnlineMatchMiddleware(BaseMiddleware):
@@ -20,20 +18,7 @@ class OnlineMatchMiddleware(BaseMiddleware):
     Если пользователь в активном матче делает НЕ игровое действие -
     завершает матч с сообщением о выходе.
     """
-    
-    # Игровые callback_data (не завершаем матч)
-    GAME_CALLBACKS = {
-        'pvp_1', 'pvp_2', 'pvp_3', 'pvp_run',
-        'pvp_tactic_defense', 'pvp_tactic_attack', 'pvp_tactic_balance',
-        'pvp_menu',  # Кнопка меню
-        'NONE'  # Заглушка
-    }
-    
-    # Игровые callback prefixes
-    GAME_CALLBACK_PREFIXES = {
-        'pvp_accept_',
-        'pvp_decline_'
-    }
+
     
     async def __call__(
         self,
@@ -47,9 +32,9 @@ class OnlineMatchMiddleware(BaseMiddleware):
         # Получаем user_id
         user_id = None
         if isinstance(event, Message):
-            user_id = event.from_user.id if not env.test_pvp else event.chat.id
+            user_id = event.from_user.id
         elif isinstance(event, CallbackQuery):
-            user_id = event.from_user.id if not env.test_pvp else event.message.chat.id
+            user_id = event.from_user.id
         
         if not user_id:
             return await handler(event, data)
@@ -59,11 +44,11 @@ class OnlineMatchMiddleware(BaseMiddleware):
             callback_data = event.data
             
             # Проверяем точное совпадение
-            if callback_data in self.GAME_CALLBACKS:
+            if callback_data in GAME_CALLBACKS:
                 return await handler(event, data)
             
             # Проверяем префиксы
-            for prefix in self.GAME_CALLBACK_PREFIXES:
+            for prefix in GAME_CALLBACK_PREFIXES:
                 if callback_data.startswith(prefix):
                     return await handler(event, data)
         
@@ -82,10 +67,7 @@ class OnlineMatchMiddleware(BaseMiddleware):
         
         if match_id:
             # Пользователь в игре, но делает НЕ игровое действие
-            logger.warning(
-                f"User {user_id} performed non-game action while in match {match_id}. "
-                f"Finishing match by exit."
-            )
+            log_event(f"Не игровое действие. Техническое поражение! | tg_id: \033[31m{user_id}\033[0m; match_id: \033[35m{match_id}\033[0m", level='WARNING')
             
             await finish_match_by_exit(match_id, user_id, redis)
             

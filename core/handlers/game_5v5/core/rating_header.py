@@ -6,7 +6,7 @@ from aiogram.fsm.state import StatesGroup, State
 import copy
 
 from core.data.postgres import PgSql
-from core.utils.anything import categories
+from core.utils.anything import categories, positions
 
 
 class Match(StatesGroup):
@@ -324,24 +324,6 @@ class PlayersPair(object):
         self.defender = defender
         self.position = position
 
-positions = ["C", "PG", "PF", "SG", "SF"]
-
-platform_position_emoji = {
-    'interior': '🎨',
-    'perimetr': '🎯'
-}
-
-pick_tactic_message = {
-    'defense': "Оборонительную🛡",
-    'attack': "Атакующую⚔️",
-    'balance': "Сбалансированную⚖️"
-}
-
-tactic_message = {
-    'defense': "Оборонительная🛡",
-    'attack': "Атакующая⚔️",
-    'balance': "Сбалансированная⚖️"
-}
 
 async def get_max_rating(user_id: int, db: PgSql) -> int:
     return await db.conn.fetchval(f"SELECT max_rating FROM user_rating WHERE user_id = $1", user_id)

@@ -5,6 +5,7 @@ import uuid
 import orjson
 from redis.asyncio import Redis
 
+from core.config_dir.config import env
 from core.utils.anything import RedisKeys
 
 
@@ -13,11 +14,7 @@ logger = logging.getLogger(__name__)
 
 class OnlineMatchesManager:
     """CRUD операции для PvP матчей в Redis"""
-    
-    # TTL для ключей (в секундах)
-    MATCH_TTL = 10800  # 3 часа
-    REQUEST_TTL = 300  # 5 минут
-    
+
     def __init__(self, redis: Redis):
         self.redis = redis
     
@@ -55,7 +52,7 @@ class OnlineMatchesManager:
         # Сохраняем с TTL
         await self.redis.setex(
             key,
-            self.REQUEST_TTL,
+            env.match_request_ttl,
             orjson.dumps(request_data)
         )
         
@@ -95,16 +92,10 @@ class OnlineMatchesManager:
         player1_username: str,
         player2_username: str,
         player1_team: dict,
-        player2_team: dict,
-        player1_real_user_id: int = None,
-        player2_real_user_id: int = None
+        player2_team: dict
     ) -> str:
         """
         Создать новый матч.
-        
-        Args:
-            player1_real_user_id: Реальный user_id игрока 1 (для FSM, может отличаться от player1_id в test_pvp)
-            player2_real_user_id: Реальный user_id игрока 2 (для FSM, может отличаться от player2_id в test_pvp)
         
         Returns:
             str: match_id (UUID)
@@ -115,8 +106,6 @@ class OnlineMatchesManager:
             "match_id": match_id,
             "player1_id": player1_id,
             "player2_id": player2_id,
-            "player1_real_user_id": player1_real_user_id or player1_id,  # Для FSM StorageKey
-            "player2_real_user_id": player2_real_user_id or player2_id,  # Для FSM StorageKey
             "player1_username": player1_username,
             "player2_username": player2_username,
             "state": "waiting_tactic",  # waiting_tactic | coin_toss | playing | finished
@@ -148,7 +137,7 @@ class OnlineMatchesManager:
         key = RedisKeys.pvp_match(match_id)
         await self.redis.setex(
             key,
-            self.MATCH_TTL,
+            env.match_ttl,
             orjson.dumps(match_data)
         )
         
@@ -191,7 +180,7 @@ class OnlineMatchesManager:
         # Сохраняем обратно
         await self.redis.setex(
             key,
-            self.MATCH_TTL,
+            env.match_ttl,
             orjson.dumps(current_data)
         )
     
@@ -222,7 +211,7 @@ class OnlineMatchesManager:
     async def set_user_in_match(self, user_id: int, match_id: str):
         """Связать пользователя с матчем"""
         key = RedisKeys.user_in_match(user_id)
-        await self.redis.setex(key, self.MATCH_TTL, match_id)
+        await self.redis.setex(key, env.match_ttl, match_id)
         logger.info(f"User {user_id} linked to match {match_id}")
     
     async def remove_user_from_match(self, user_id: int):
@@ -274,8 +263,5 @@ class OnlineMatchesManager:
 
 
 def get_matches_manager(redis: Redis) -> OnlineMatchesManager:
-    """
-    Фабрика для создания менеджера матчей.
-    Используется для DI в хендлерах.
-    """
+    """для DI в хендлерах"""
     return OnlineMatchesManager(redis)

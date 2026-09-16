@@ -7,4 +7,4 @@ async def set_commands(bot: Bot):
         BotCommand(command='/start', description='Запуск бота'),
     ]
 
-    await bot.set_my_commands(commands, BotCommandScopeDefault())  # noqa: W292
+    await bot.set_my_commands(commands, BotCommandScopeDefault())
