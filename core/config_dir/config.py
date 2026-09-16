@@ -45,9 +45,6 @@ class Settings(BaseSettings):
 
     cards_path: Path | str = CARDS_PHOTO_PATH
 
-    # deprecated параметр. Не указывать
-    test_pvp: bool = bool(os.getenv('TEST_PVP', False))
-
     # Настройки дружеского ПВП режима
     match_ttl: int = os.getenv("MATCH_TTL", 10_800) # 3 часа
     match_request_ttl: int = os.getenv("MATCH_REQUEST_TTL", 300) # 5 минут

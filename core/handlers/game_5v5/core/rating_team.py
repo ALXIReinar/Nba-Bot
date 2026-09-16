@@ -32,7 +32,7 @@ async def get_rating_text(user_id, db: PgSql) -> str:
 
 @router.callback_query(F.data == "members", StateFilter(Match.Team))
 async def choose_members(callback : CallbackQuery, state : FSMContext, db: PgSql):
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     data = await state.get_data()
     tactic = data['tactic']
     team : Team = await Team.get_team_from_user_id(user_id, db)
@@ -42,14 +42,14 @@ async def choose_members(callback : CallbackQuery, state : FSMContext, db: PgSql
 
 @router.callback_query(F.data == 'back', StateFilter(Match.WatchingTeam, Match.WatchingTactic))
 async def back_to_tactic(callback : CallbackQuery, state : FSMContext):
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     await callback.message.delete()
     await state.set_state(Match.Team)
     await bot.send_message(chat_id=user_id, text="⛹️5 на 5", reply_markup=keyboards.keyboard_5v5_team)
 
 @router.callback_query(F.data == "my_team", StateFilter(Match.Main))
 async def show_team(callback : CallbackQuery, state : FSMContext, db: PgSql):
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     await state.set_state(Match.Team)
     tactic = await get_user_defense_tactic(user_id, db)
     await state.update_data(tactic=tactic)
@@ -63,7 +63,7 @@ async def show_tactics(callback : CallbackQuery, state : FSMContext):
 
 @router.callback_query(F.data.in_({"defense", "attack", "balance"}), StateFilter(Match.WatchingTactic))
 async def choose_tactic(callback : CallbackQuery, state : FSMContext, db: PgSql):
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     await db.conn.execute(f"UPDATE user_rating SET defense_tactic = '{callback.data}' WHERE user_id={user_id};")
     await state.update_data(tactic=callback.data)
     await callback.message.edit_text(text="⛹️5 на 5\n\nВыбери тактику для обороны.", reply_markup=keyboards.craft_choose_tactic(callback.data))
@@ -71,7 +71,7 @@ async def choose_tactic(callback : CallbackQuery, state : FSMContext, db: PgSql)
 
 @router.callback_query(F.data == 'ticket_channel', StateFilter(Match.Main))
 async def ticket_channels(callback: CallbackQuery, state: FSMContext, db: PgSql):
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     await state.set_state(Match.WatchingChannels)
     text = "⛹️5 на 5\n\nПодпишись на каналы и получай за это билетики.\n"
     channels_info = db.get_channels_info()
@@ -108,7 +108,7 @@ async def ticket_channels(callback: CallbackQuery, state: FSMContext, db: PgSql)
 
 @router.callback_query(F.data == "rating_table", StateFilter(Match.Main))
 async def show_rating_table(callback : CallbackQuery, state : FSMContext, db: PgSql):
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
 
     users_info = await db.conn.fetch("SELECT user_id, rating FROM user_rating WHERE played_this_season is TRUE ORDER BY rating DESC LIMIT 10;")
     if(len(users_info) == 0):
@@ -155,19 +155,19 @@ async def show_rating_table(callback : CallbackQuery, state : FSMContext, db: Pg
 
 @router.callback_query(F.data == 'back', StateFilter(Match.Team, Match.WatchingChannels, Match.ChoosingToPlay, Match.WatchingRules, Match.WatchingRating))
 async def back_to_main(callback: CallbackQuery, state : FSMContext, db: PgSql):
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     await state.set_state(Match.Main)
     await callback.message.edit_text(text=f"⛹️5 на 5\n\n{await get_rating_text(user_id, db)}", reply_markup=keyboards.keyboard_5v5)
 
 @router.callback_query(F.data == "5v5")
 async def show_5v5_keyboard(callback : CallbackQuery, state : FSMContext, db: PgSql):
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     await state.set_state(Match.Main)
     await callback.message.edit_text(text=f"⛹️5 на 5\n\n{await get_rating_text(user_id, db)}", reply_markup=keyboards.keyboard_5v5)
 
 @router.callback_query(F.data == "play", StateFilter(Match.Main))
 async def show_play_keyboard(callback : CallbackQuery, state : FSMContext, db: PgSql):
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     # team_ids = await db.conn.fetchrow(f"SELECT {positions[0]}, {positions[1]}, {positions[2]}, {positions[3]}, {positions[4]} FROM user_team WHERE user_id={callback.from_user.id};")
     team_ids = await db.conn.fetchrow(f"SELECT {', '.join(positions)} FROM user_team WHERE user_id = $1 AND ({', '.join(positions)}) NOT NULL", user_id)
     if None in team_ids:
@@ -211,11 +211,11 @@ async def choose_player(position: str, callback : CallbackQuery, state : FSMCont
     new_keyboard = keyboards.craft_team_keyboard(position, new_have, positions[current_pos - 1], positions[(current_pos + 1) % len(positions)])
     await state.update_data(have=new_have)
     if new_have:
-        user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+        user_id = callback.from_user.id
         await image_cache.edit_card_media(user_id, callback.message.message_id, player.card_id, player.to_text(data['tactic']), new_keyboard)
         # await callback.message.edit_media(media=mediaPhoto, reply_markup=new_keyboard)
     else:
-        user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+        user_id = callback.from_user.id
         if(have):
             await callback.message.delete()
             await bot.send_message(chat_id=user_id, text=text, reply_markup=new_keyboard)
@@ -228,7 +228,7 @@ async def choose_player(position: str, callback : CallbackQuery, state : FSMCont
 @router.callback_query(F.data == "rewards", StateFilter(Match.Main))
 async def rewards(callback: CallbackQuery, state: FSMContext, db: PgSql):
     await state.set_state(Match.WatchingRating)
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     max_rating = await get_max_rating(user_id, db)
     rewards = await db.conn.fetch("SELECT rating, reward FROM rewards_5v5;")
     text = '🎗Награды\n\n'

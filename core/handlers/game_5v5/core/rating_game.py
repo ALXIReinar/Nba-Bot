@@ -16,7 +16,7 @@ from core.config_dir.img_cache import image_cache
 from core.data.postgres import PgSql
 from core.data.sql_queries import users
 from core.handlers.game_5v5.core.game_stat_configs import pass_debuff_values, PassSecondState, dribbling_buff_values, PassFirstState, \
-    PressureResult, AttackFirstState, shoot_buff_values
+    PressureResult, AttackFirstState, shoot_buff_values, ShootType
 from core.handlers.game_5v5.core.rating_header import PlayerInfo, Team, PlayersPair, Match
 from core.utils.anything import positions, platform_position_emoji, pick_tactic_message, tactic_message
 from core.utils import keyboards
@@ -311,7 +311,7 @@ async def send_attack_message(user_id, state : FSMContext):
         await send_dribble_message(user_id, pg_pair.attacker, pg_pair.defender, pg_pair.position, opp_def)
 
 async def send_start_player_attack_message(callback : CallbackQuery, state : FSMContext):
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     data = await state.get_data()
     own_score = data['own_score']
     opp_score = data['opp_score']
@@ -320,7 +320,7 @@ async def send_start_player_attack_message(callback : CallbackQuery, state : FSM
 
 @router.callback_query(F.data.in_({'1', '2', '3'}), Match.PlayingMatch)
 async def edit_message(callback : CallbackQuery, state : FSMContext):
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
 
     if(users.is_user_actions_locked(user_id)):
         await callback.answer("Подожди 30 сек")
@@ -404,49 +404,49 @@ def calculate_pressure(hands, steal) -> PressureResult:
 def try_shoot(dribbling, defence, hands, steal, attack, block) -> AttackFirstState:
     diff = dribbling - defence
     rand = random.random()
-    shootType = None
+    shoot_Type = None
     if(diff > 30):
-        shootType = ShootType.free_throw
+        shoot_Type = ShootType.free_throw
     elif (diff > 15):
         chance = (diff - 15) / 15
         if rand <= chance:
-            shootType = ShootType.free_throw
+            shoot_Type = ShootType.free_throw
         else:
-            shootType = ShootType.hard_throw
+            shoot_Type = ShootType.hard_throw
     elif (diff > 5):
-        shootType = ShootType.hard_throw
+        shoot_Type = ShootType.hard_throw
     elif (diff > -5):
         chance = (diff + 5) / 10
         if(rand < chance):
-            shootType = ShootType.hard_throw
+            shoot_Type = ShootType.hard_throw
         else:
-            shootType = ShootType.through_block
+            shoot_Type = ShootType.through_block
     else:
         pressure = calculate_pressure(hands, steal)
         if pressure == PressureResult.overcome_pressure:
-            shootType = ShootType.through_block
+            shoot_Type = ShootType.through_block
 
-    if(shootType == None):
+    if(shoot_Type == None):
         return AttackFirstState.lost
     
     rand = random.random()
-    buff = shoot_buff_values[shootType]
+    buff = shoot_buff_values[shoot_Type]
     attack = min(100, int(buff * attack)) / 100
-    if shootType == ShootType.through_block:
+    if shoot_Type == ShootType.through_block:
         attack -= block / 100 / 2
     if rand <= attack:
-        if(shootType == ShootType.through_block):
+        if(shoot_Type == ShootType.through_block):
             return AttackFirstState.trough_block_success
-        elif(shootType == ShootType.hard_throw):
+        elif(shoot_Type == ShootType.hard_throw):
             return AttackFirstState.hard_throw_success
-        elif(shootType == ShootType.free_throw):
+        elif(shoot_Type == ShootType.free_throw):
             return AttackFirstState.free_throw_success
     else:
-        if(shootType == ShootType.through_block):
+        if(shoot_Type == ShootType.through_block):
             return AttackFirstState.trough_block_fail
-        elif(shootType == ShootType.hard_throw):
+        elif(shoot_Type == ShootType.hard_throw):
             return AttackFirstState.hard_throw_fail
-        elif(shootType == ShootType.free_throw):
+        elif(shoot_Type == ShootType.free_throw):
             return AttackFirstState.free_throw_fail 
 
 def try_to_pass(pg_pair : PlayersPair, pass_pair : PlayersPair) -> PassFirstState | PassSecondState:
@@ -524,7 +524,7 @@ def calculate_goodness_pass(pg_pair: PlayersPair, pass_pair: PlayersPair) -> flo
 
 @router.callback_query(F.data == 'run')
 async def run(callback : CallbackQuery, state : FSMContext, db: PgSql):
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
 
     if(users.is_user_actions_locked(user_id)):
         await callback.answer("Подожди 30 сек")
@@ -614,7 +614,7 @@ async def run(callback : CallbackQuery, state : FSMContext, db: PgSql):
         users.unlock_user_actions(user_id)
 
 async def bot_try_pass(callback: CallbackQuery, state: FSMContext, pg_pair : PlayersPair, pass_pair : PlayersPair, db: PgSql):
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     message = get_pass_message(pg_pair, pass_pair)
     await image_cache.send_card(user_id, pg_pair.attacker.card_id, '🤖' + message)
 
@@ -631,7 +631,7 @@ async def bot_try_pass(callback: CallbackQuery, state: FSMContext, pg_pair : Pla
 
 
 async def bot_try_dribble(callback: CallbackQuery, state: FSMContext, pair : PlayersPair, db: PgSql):
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     data = await state.get_data()
 
     opp_def = pair.defender.get_interior_def() if pair.position == 'interior' else pair.defender.get_perimetr_def()
@@ -856,7 +856,7 @@ async def change_rating(user_id, add_rating, db: PgSql):
 
 async def start_player_cycle(callback : CallbackQuery, state : FSMContext, switch : bool, save_pg : bool, db: PgSql):
     data = await state.get_data()
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     await asyncio.sleep(1)
     if(data['cycle'] == max_cycles):
 
@@ -913,7 +913,7 @@ async def play_ranked(callback : CallbackQuery, state : FSMContext, db: PgSql):
     """
     Матч Против бота, НЕ требует зависимости для ТЗ(онлайн пвп"игрок против игрока", а не бот vs игрок)
     """
-    user_id = callback.message.chat.id if env.test_pvp else callback.from_user.id
+    user_id = callback.from_user.id
     tickets = await db.conn.fetchval("SELECT tickets FROM user_rating WHERE user_id = $1", user_id)
 
     if(tickets <= 0):
