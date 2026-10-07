@@ -168,3 +168,4 @@ cython_debug/
 cards_photo/
 db/
 bot_logs/
+.vscode/

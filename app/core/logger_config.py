@@ -1,6 +1,5 @@
 import os
 import inspect
-import json
 from datetime import datetime, UTC
 
 import logging
@@ -10,7 +9,7 @@ from typing import Literal, Any
 
 import orjson
 
-from core.config_dir.config import LOG_DIR
+from app.core.config import LOG_DIR
 
 
 class JSONFormatter(logging.Formatter):
