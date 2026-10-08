@@ -79,6 +79,6 @@ async def cmd_start(
     await set_commands()
 
 @router.message(F.text.startswith('🧍Профиль'))
-async def cmd_help(message: Message, db: PgSql):
+async def cmd_help(message: Message):
     await message.answer("Заглушка, чтобы отобразить клаву с кнопкой 'Задания'", reply_markup=keyboards.profile_keyboard)
 

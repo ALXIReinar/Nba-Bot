@@ -169,3 +169,5 @@ cards_photo/
 db/
 bot_logs/
 .vscode/
+/app/tests/TESTING_REPORT.md
+*.canvas

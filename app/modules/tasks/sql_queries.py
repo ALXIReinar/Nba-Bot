@@ -1,4 +1,4 @@
-from asyncpg import Connection
+from asyncpg import Connection, UniqueViolationError
 
 from app.core.logger_config import log_event
 from app.modules.tasks.anything import ChallengesTasksSetStatuses, ChallengeStatuses, ChallengesCategories
@@ -81,10 +81,22 @@ class ChallengesQueries:
         rows = await self.conn.fetch(query, user_id)
         return [row['challenge_id'] for row in rows]
 
-    async def set_select_task_set(self, user_id):
+    async def set_select_task_set(self, user_id, filter_by_difficulty_id: int = None):
+        """
+        Создаёт draft набор заданий и генерирует персональную выборку челленджей.
+        
+        Args:
+            user_id: ID пользователя
+            filter_by_difficulty_id: Опциональный фильтр по сложности.
+                - Если None (по умолчанию): выбираются челленджи с любыми наградами ``(ЗАБЫТЬ ПРО ЭТОТ ПАРАМЕТР В ПРОД-КОДЕ)``
+                - Если указано (1, 2 или 3): выбираются только челленджи с наградами для этой сложности (Реализовано для тестов, чтобы бороться с рандомом)
+        
+        Returns:
+            tuple: (task_set_id, accepted_challenges)
+        """
         query_ins = '''
         INSERT INTO challenges_tasks_set (user_id, status) VALUES ($1, $2) 
-        ON CONFLICT (user_id) WHERE status IN ($2, $3) DO NOTHING RETURNING id
+        ON CONFLICT (user_id) WHERE status = ANY (ARRAY[$2, $3, $4]) DO NOTHING RETURNING id
         '''
 
         query_read_set = 'SELECT id FROM challenges_tasks_set WHERE user_id = $1 AND status = $2'
@@ -96,10 +108,12 @@ class ChallengesQueries:
         query_generate_layout = '''
         -- Генерируем случайную выборку из 8 заданий с заданным распределением(4 - из 5 на 5, 2 - коллекции, и т.д.) по категориям
         WITH valid_challenges AS (
-            -- Выбираем только челленджи с валидной раскладкой сложностей
+            -- Выбираем только челленджи с хотя бы одной наградой
+            -- Опционально фильтруем по конкретной сложности (для тестов)
             SELECT DISTINCT c.id as challenge_id, c.category_id
             FROM challenges c
-            JOIN challenges_rewards cr ON cr.challenge_id = c.id
+            INNER JOIN challenges_rewards cr ON cr.challenge_id = c.id
+            WHERE ($6::int IS NULL OR cr.challenge_difficulty_id = $6)
         ),
         invite_friends AS (
             -- 1 из "Пригласи друга" (category_id = 2)
@@ -148,7 +162,10 @@ class ChallengesQueries:
         ORDER BY priority, challenge_id
         '''
 
-        task_set_id = await self.conn.fetchval(query_ins, user_id, ChallengesTasksSetStatuses.draft, ChallengesTasksSetStatuses.in_progress)
+        task_set_id = await self.conn.fetchval(
+            query_ins, user_id,
+            ChallengesTasksSetStatuses.draft, ChallengesTasksSetStatuses.in_progress, ChallengesTasksSetStatuses.completed
+        )
         if task_set_id:
 
             # Удаляем старую выборку челленджей
@@ -161,6 +178,7 @@ class ChallengesQueries:
                 ChallengesCategories.pvp_5v5,
                 ChallengesCategories.throw_ball,
                 user_id,
+                filter_by_difficulty_id,  # Передаём опциональный фильтр
             )
 
             log_event(f'Сгенерировали персональную выборку челленджей для пользователя | user_id: \033[32m{user_id}\033[0m', level='WARNING')
@@ -169,6 +187,10 @@ class ChallengesQueries:
         # 2 запроса, т.к. обязательно нужен task_set_id.
         # Если задачи не выбраны, то task_set_id тоже не будет
         task_set_id = await self.conn.fetchval(query_read_set, user_id, ChallengesTasksSetStatuses.draft)
+        
+        if not task_set_id:
+            return None, []
+            
         return task_set_id, await self.conn.fetch(query_read_meta, task_set_id)
 
     async def accept_challenge(self, task_set_id: int, challenge_id: int, challenge_difficulty_id: int):
@@ -178,12 +200,30 @@ class ChallengesQueries:
         FROM generate_series(1, 4) AS s(slot)
         WHERE s.slot NOT IN ( 
             SELECT slot FROM user_challenges WHERE task_set_id = $1 AND status = $4
-        ) 
+        )
+        AND EXISTS (
+            SELECT 1 FROM challenges_tasks_set 
+            WHERE id = $1 AND status = $5 -- только для draft наборов
+        )
         ORDER BY s.slot ASC LIMIT 1
         RETURNING slot
         '''
-        return await self.conn.fetchval(query, task_set_id, challenge_id, challenge_difficulty_id, ChallengesTasksSetStatuses.draft)
+        try:
+            slot = await self.conn.fetchval(
+                query, 
+                task_set_id, 
+                challenge_id, 
+                challenge_difficulty_id, 
+                ChallengeStatuses.pending,
+                ChallengesTasksSetStatuses.draft
+            )
+            if slot is None:
+                # Все 4 слота заняты
+                return False, None
+            return True, slot
 
+        except UniqueViolationError:
+            return False, None
     async def decline_challenge(self, task_set_id: int, challenge_id: int, slot: int):
         """Строгая фильтрация гарантирует, что таску возможно удалить ТОЛЬКО на этапе формирования списка заданий"""
         query = '''
@@ -200,7 +240,8 @@ class ChallengesQueries:
         query = '''
         WITH switch_task_set_timer AS (
             UPDATE challenges_tasks_set SET status = $2, started_at = now()
-            WHERE id = $1 AND status = $3
+            WHERE id = $1
+              AND status = $3 AND (SELECT COUNT(*) FROM user_challenges WHERE task_set_id = $1 AND status = $5) = 4 -- должно быть ровно 4 задания(лимит на выполнение)
             RETURNING id AS upd_task_set_id
         )
         UPDATE user_challenges SET status = $4
@@ -250,19 +291,30 @@ class ChallengesQueries:
 
 
         query = f'''
-        WITH complete_task_set AS (
-            UPDATE challenges_tasks_set SET status = $1 -- completed
-            WHERE id = $6
-                AND status NOT IN ($1, $2) -- completed, closed
-                AND NOT EXISTS (SELECT id FROM user_challenges WHERE task_set_id = $6 AND user_challenges.status = $5)
-        ),
-        post_complete_tasks AS (
+        WITH post_complete_tasks AS (
             UPDATE user_challenges SET status = $4 -- completed
             WHERE {tasks_scope} AND status = $3 -- reward_ready. Гарантирует начисление только один раз
-            RETURNING id AS task_id, challenge_difficulty_id
+            RETURNING id AS task_id, challenge_difficulty_id, task_set_id
+        ),
+        remaining_tasks AS (
+            -- Подсчитываем несобранные задания, ИСКЛЮЧАЯ только что собранные
+            SELECT COUNT(*) AS remaining_count
+            FROM user_challenges uc
+            WHERE uc.task_set_id = $6
+            AND uc.status IN ($5, $3) -- in_progress или reward_ready
+            AND uc.id NOT IN (SELECT task_id FROM post_complete_tasks) -- Исключаем собранные
+        ),
+        complete_task_set AS (
+            UPDATE challenges_tasks_set 
+            SET status = $1 -- completed
+            WHERE id = $6
+                AND status NOT IN ($1, $2) -- completed, closed
+                -- Набор completed только если не осталось несобранных заданий
+                AND (SELECT remaining_count FROM remaining_tasks) = 0
+            RETURNING id
         )
         UPDATE users
-        SET exp = MOD(exp + user_rewards.add_exp, 1000),
+        SET exp = MOD(users.exp + user_rewards.add_exp, 1000),
             throw_count = throw_count + user_rewards.add_throw,
             additional_try = additional_try + user_rewards.add_try   
         FROM (
@@ -270,7 +322,8 @@ class ChallengesQueries:
                 cts.user_id AS rewards_user_id, 
                 SUM(cr.reward_exp) AS add_exp,
                 SUM(cr.reward_try) AS add_try,
-                SUM(cr.reward_throw) AS add_throw
+                SUM(cr.reward_throw) AS add_throw,
+                (SELECT exp FROM users WHERE user_id = cts.user_id) AS old_exp  -- Сохраняем старое значение exp
             FROM user_challenges us
             JOIN post_complete_tasks pct ON us.id = pct.task_id
             JOIN challenges_tasks_set cts ON us.task_set_id = cts.id
@@ -278,7 +331,7 @@ class ChallengesQueries:
 			GROUP BY cur_task_set_id, rewards_user_id
         ) AS user_rewards
         WHERE users.user_id = user_rewards.rewards_user_id
-        RETURNING user_id, (users.exp + user_rewards.add_exp) AS credit_packs_in_exp -- узнаём, сколько паков нужно начислить пользователю(в EXP)
+        RETURNING user_id, (user_rewards.old_exp + user_rewards.add_exp) AS credit_packs_in_exp -- Возвращаем сумму ДО применения MOD
         '''
         return await self.conn.fetchrow(
             query,
@@ -292,33 +345,38 @@ class ChallengesQueries:
 
 
     async def add_progress_by_action(self, challenge_id: int, user_id: int, add_progress: int):
+        if add_progress <= 0:
+            log_event(f'Попытка добавить некорректный прогресс | user_id: {user_id}, challenge_id: {challenge_id}, add_progress: {add_progress}', level='WARNING')
+            return []
+        
         query = '''
         UPDATE user_challenges AS uc
         SET 
-            progress = LEAST(uc.progress + $3, ac.goal), -- LEAST не даст прогрессу превысить цель. полезно для UI
-            -- Если старый (прогресс + добавка) >= цели, меняем статус на "reward_ready" ($5)
+            progress = LEAST(uc.progress + $3, cr.goal),
             status = CASE 
-                WHEN (uc.progress + $3) >= ac.goal THEN $5::smallint 
+                WHEN (uc.progress + $3) >= cr.goal THEN $5::smallint 
                 ELSE uc.status
             END
-        FROM (
-            SELECT 
-                us.id AS uc_id, 
-                cr.goal
-            FROM user_challenges us
-            JOIN challenges_tasks_set cts ON us.task_set_id = cts.id
-            JOIN challenges_rewards cr
-                ON cr.challenge_id = us.challenge_id 
-                AND cr.challenge_difficulty_id = us.challenge_difficulty_id
-            WHERE us.challenge_id = $1
-                AND cts.user_id = $2
-                AND us.status = $4  -- Фильтр по статусу ВНУТРИ подзапроса
-        ) AS ac
-        WHERE uc.id = ac.uc_id  -- Связываем только с отфильтрованными записями
+        FROM challenges_tasks_set cts, challenges_rewards cr
+        WHERE uc.task_set_id = cts.id
+            AND cr.challenge_id = uc.challenge_id 
+            AND cr.challenge_difficulty_id = uc.challenge_difficulty_id
+            AND uc.challenge_id = $1
+            AND cts.user_id = $2
+            AND uc.status = $4  -- Только задания в статусе in_progress
+            AND cts.status = $6  -- Только из in_progress набора заданий
         RETURNING
             uc.id AS task_id,
             uc.challenge_id,
             uc.slot,
-            uc.status -- Вернет уже обновленный статус
+            uc.status
         '''
-        return await self.conn.fetch(query, challenge_id, user_id, add_progress, ChallengeStatuses.in_progress, ChallengeStatuses.reward_ready)
+        return await self.conn.fetch(
+            query, 
+            challenge_id, 
+            user_id, 
+            add_progress, 
+            ChallengeStatuses.in_progress, 
+            ChallengeStatuses.reward_ready, 
+            ChallengesTasksSetStatuses.in_progress
+        )

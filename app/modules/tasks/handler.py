@@ -42,6 +42,13 @@ async def profile_message(call: CallbackQuery, db: PgSql):
 async def answer_tasks_choose_new(call: CallbackQuery, db: PgSql, redis: Redis, state: FSMContext):
     task_set_id, accepted_challenges = await db.challenges.set_select_task_set(call.from_user.id)
 
+    "Попытка пересоздать набор заданий"
+    if not task_set_id:
+        log_event(f'Попытка создать набор заданий в дополнение к существующему | user_id: \033[31m{call.from_user.id}\033[0m', level='WARNING')
+        await call.message.answer("⚠️Не удалось предоставить набор заданий")
+        await call.answer()
+        return
+
     log_event(f'Пользователь переходи выбирает новые задания | task_set_id: \033[31m{task_set_id}\033[0m; user_id: \033[32m{call.from_user.id}\033[0m')
     fsm_data = {'task_set_id': task_set_id, 'accepted_challenges': {}, 'accepted_slots': {}}
     if accepted_challenges:
@@ -101,9 +108,9 @@ async def accept_task(call: CallbackQuery, db: PgSql, redis: Redis, state: FSMCo
         return
 
     "Регаем слот в бд"
-    slot = await db.challenges.accept_challenge(task_set_id, chal_id, diff_id)
+    success, slot = await db.challenges.accept_challenge(task_set_id, chal_id, diff_id)
     log_event(f'Пользователь выбрал челлендж. Сохранили в БД и в state | user_id: \033[31m{call.from_user.id}\033[0m; challenge_id: \033[32m{chal_id}\033[0m; challenge_difficulty_id: \033[34m{diff_id}\033[0m; slot: \033[36m{slot}\033[0m; task_set_id: \033[35m{task_set_id}\033[0m')
-    if not slot:
+    if not success:
         log_event(f'Не удалось выбрать  | user_id: \033[31m{call.from_user.id}\033[0m; challenge_id: \033[32m{chal_id}\033[0m; challenge_difficulty_id: \033[34m{diff_id}\033[0m; task_set_id: \033[35m{task_set_id}\033[0m', level='WARNING')
         await call.message.answer("⚠️ Не удалось добавить задание")
         await call.answer()
@@ -134,8 +141,15 @@ async def accept_task(call: CallbackQuery, db: PgSql, redis: Redis, state: FSMCo
         await call.answer()
         return
 
+    "Обработка повторного удаления"
+    if not (choosed_slot:= acc_slots.get(chal_id)):
+        log_event(f'Не удалось отменить выбор челленджа. ПОВТОРНОЕ УДАЛЕНИЕ | user_id: \033[31m{call.from_user.id}\033[0m; challenge_id: \033[32m{chal_id}\033[0m; challenge_difficulty_id: \033[34m{diff_id}\033[0m; task_set_id: \033[35m{task_set_id}\033[0m',level='WARNING')
+        await call.message.answer("⚠️ Ты уже убрал это задание")
+        await call.answer()
+        return
+
     "Регаем слот в бд"
-    res = await db.challenges.decline_challenge(task_set_id, chal_id, acc_slots[chal_id])
+    res = await db.challenges.decline_challenge(task_set_id, chal_id, choosed_slot)
     log_event(f'Пользователь отменил челлендж. Удалили ищ БД и state | user_id: \033[31m{call.from_user.id}\033[0m; challenge_id: \033[32m{chal_id}\033[0m; challenge_difficulty_id: \033[34m{diff_id}\033[0m; task_set_id: \033[35m{task_set_id}\033[0m')
     if not res:
         log_event(f'Не удалось отменить выбор челленджа | user_id: \033[31m{call.from_user.id}\033[0m; challenge_id: \033[32m{chal_id}\033[0m; challenge_difficulty_id: \033[34m{diff_id}\033[0m; task_set_id: \033[35m{task_set_id}\033[0m',level='WARNING')
@@ -171,7 +185,8 @@ async def confirm_task_set(call: CallbackQuery, db: PgSql, state: FSMContext):
     res = await db.challenges.activate_task_set_timer(task_set_id)
     if res:
         await call.message.answer('Задания активированы! У тебя есть 7 дней на выполнение!')
-
+    else:
+        await call.message.answer('Выбери 4 задания перед активацией!')
     await call.answer()
 
 
@@ -195,6 +210,7 @@ async def collect_rewards_all(call: CallbackQuery, db: PgSql):
     accrual_res = await db.challenges.collect_rewards(task_set_id=task_set_id)
     if not accrual_res:
         log_event(f"Попытка дюпа награды | user_id: \033[31m{call.from_user.id}\033[0m; task_set_id: \033[33m{task_set_id}\033[0m", level='WARNING')
+        await bot.edit_message_text("⚠️Награды уже получены!")
         await call.answer()
         return
 
@@ -209,7 +225,8 @@ async def reward_task_view(call: CallbackQuery, db: PgSql):
     task_id = int(call.data.split('_')[-1])
     res = await db.challenges.collect_rewards(task_id=task_id)
     if not res:
-        log_event(f'Не удалось собрать награду. task_set_id не существует | task_id: \033[32m{task_id}\033[0m; user_id: \033[31m{call.from_user.id}\033[0m', level='WARNING')
+        log_event(f'Не удалось собрать награду. task_set_id не существует или награда получена | task_id: \033[32m{task_id}\033[0m; user_id: \033[31m{call.from_user.id}\033[0m', level='WARNING')
+        await bot.edit_message_text("⚠️Награда уже получена!", call.from_user.id, call.message.message_id)
         await call.answer()
         return
 

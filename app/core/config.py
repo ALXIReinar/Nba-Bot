@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 # Загружаем данные из .env файла
 env_files = (
     os.getenv("ENV_FILE") or
-    ".env.bot"
+    ".env.bot.prod" # TODO: обновил имя энв файла. Было .env.bot
 )
 logging.critical(f"env file: \033[33m{env_files}\033[0m")
 load_dotenv(env_files)
